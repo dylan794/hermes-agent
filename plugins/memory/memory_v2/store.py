@@ -389,12 +389,37 @@ class MemoryV2Store:
             return False
         return self._require_usable_raw_index(index).raw_event_exists(event_id)
 
+    def canonical_raw_event_exists(self, event_id: str, *, index: Any = None) -> bool:
+        """Verify that indexed raw evidence resolves to an intact canonical JSONL row."""
+        safe_id = str(event_id or "").strip()
+        if not safe_id or self.is_raw_event_tombstoned(safe_id):
+            return False
+        raw_index = self._require_usable_raw_index(index)
+        metadata = raw_index.raw_event_metadata(safe_id)
+        if not metadata:
+            return False
+        try:
+            event = self._hydrate_raw_event_metadata(metadata)
+        except (OSError, ValueError, ValidationError, json.JSONDecodeError):
+            return False
+        if not event:
+            return False
+        recorded_content_hash = str(event.get("content_sha256") or "")
+        recorded_record_hash = str(event.get("record_sha256") or "")
+        if not recorded_content_hash or not recorded_record_hash:
+            return False
+        return (
+            recorded_content_hash == self._raw_event_content_hash(event)
+            and recorded_record_hash == self._raw_event_record_hash(event)
+            and recorded_record_hash == str(metadata.get("record_sha256") or "")
+        )
+
     def source_ref_exists(self, source_id: str, *, index: Any = None) -> bool:
         """Return whether a source ref is usable for grounding.
 
-        Raw archive sidecars are not independently sufficient evidence.  When a
-        SourceRef points at ``raw_event:<id>``, the canonical raw event must still
-        exist in the derived raw index and must not be tombstoned.
+        Raw archive sidecars and derived index rows are not independently
+        sufficient evidence. When a SourceRef points at ``raw_event:<id>``, the
+        indexed byte slice must hydrate from canonical JSONL and pass hash checks.
         """
         safe_id = str(source_id or "").strip()
         if not safe_id:
@@ -404,7 +429,7 @@ class MemoryV2Store:
             raw_id = self.raw_event_id_from_source_ref(source)
             if raw_id:
                 try:
-                    return self.raw_event_exists(raw_id, index=index)
+                    return self.canonical_raw_event_exists(raw_id, index=index)
                 except ValidationError:
                     return False
             uri = str(source.uri or "").strip()
@@ -419,7 +444,7 @@ class MemoryV2Store:
             # memory record before they can ground promotion.
             return False
         try:
-            return self.raw_event_exists(safe_id, index=index)
+            return self.canonical_raw_event_exists(safe_id, index=index)
         except ValidationError:
             return False
 

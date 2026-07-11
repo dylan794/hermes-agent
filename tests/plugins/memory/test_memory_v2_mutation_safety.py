@@ -8,6 +8,7 @@ import sys
 import textwrap
 import time
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -117,6 +118,71 @@ def test_profile_lock_timeout_fails_closed_when_held_by_another_process(tmp_path
     finally:
         holder.terminate()
         holder.wait(timeout=5)
+
+
+def test_canonical_source_verification_rejects_tampered_jsonl_even_when_index_row_exists(tmp_path):
+    provider = _provider(tmp_path)
+    event = provider.store.append_raw_event(
+        {
+            "id": "event_canonical_tamper",
+            "type": "turn",
+            "session_id": "session-safety",
+            "user_content": "canonical evidence alpha",
+        }
+    )
+
+    assert provider.store.source_ref_exists(event["id"], index=provider.index) is True
+    raw_text = provider.store.raw_events_path.read_text(encoding="utf-8")
+    provider.store.raw_events_path.write_text(
+        raw_text.replace("canonical evidence alpha", "canonical evidence omega"),
+        encoding="utf-8",
+    )
+
+    assert provider.index.raw_event_exists(event["id"]) is True
+    assert provider.store.source_ref_exists(event["id"], index=provider.index) is False
+
+
+def test_candidate_read_and_source_validation_are_inside_profile_lock(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    event = provider.store.append_raw_event(
+        {"type": "turn", "session_id": "session-safety", "user_content": "locked source"}
+    )
+    provider.store.append_candidate(
+        CandidateMemory(id="cand_locked_reject", type="fact", claim="reject me", source_refs=[event["id"]])
+    )
+    provider.store.append_candidate(
+        CandidateMemory(id="cand_locked_promote", type="fact", claim="promote me", source_refs=[event["id"]])
+    )
+
+    state = {"held": False}
+    original_lock = provider.store.profile_lock
+    original_list = provider.store.list_candidates
+    original_source_exists = provider.store.source_ref_exists
+
+    @contextmanager
+    def tracked_lock(*args, **kwargs):
+        with original_lock(*args, **kwargs):
+            state["held"] = True
+            try:
+                yield
+            finally:
+                state["held"] = False
+
+    def checked_list_candidates():
+        assert state["held"] is True
+        return original_list()
+
+    def checked_source_ref_exists(source_id, *, index=None):
+        assert state["held"] is True
+        return original_source_exists(source_id, index=index)
+
+    monkeypatch.setattr(provider.store, "profile_lock", tracked_lock)
+    monkeypatch.setattr(provider.store, "list_candidates", checked_list_candidates)
+    monkeypatch.setattr(provider.store, "source_ref_exists", checked_source_ref_exists)
+
+    service = MemoryOperationService(provider.store, provider.index)
+    assert service.reject_candidate("cand_locked_reject", "reviewed").success is True
+    assert service.promote_candidate("cand_locked_promote").success is True
 
 
 def test_operation_journal_records_prepared_then_committed_for_canonical_mutation(tmp_path):

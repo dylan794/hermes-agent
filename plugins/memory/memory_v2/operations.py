@@ -63,26 +63,26 @@ class MemoryOperationService:
         if not reason:
             return self._error("reject_candidate", "reason is required")
 
-        candidates = self.store.list_candidates()
-        target = next((candidate for candidate in candidates if candidate.id == candidate_id), None)
-        if target is None:
-            return self._error("reject_candidate", f"candidate not found: {candidate_id}")
-        if target.gate_decision == GateDecision.REJECTED:
-            return MemoryOperationResult(
-                success=True,
-                operation_type="reject_candidate",
-                ids=[candidate_id],
-                payload={"already_rejected": True, "candidate": target.to_dict()},
-            )
-
         operation_id = f"op_{uuid.uuid4().hex}"
         operation_type = "reject_candidate"
         canonical_write_started = False
+        target: Optional[CandidateMemory] = None
         try:
             with self.store.profile_lock():
                 interrupted = self._interrupted_operations()
                 if interrupted:
                     return self._error(operation_type, f"interrupted operation blocks canonical mutation: {interrupted[0]['operation_id']}")
+                candidates = self.store.list_candidates()
+                target = next((candidate for candidate in candidates if candidate.id == candidate_id), None)
+                if target is None:
+                    return self._error(operation_type, f"candidate not found: {candidate_id}")
+                if target.gate_decision == GateDecision.REJECTED:
+                    return MemoryOperationResult(
+                        success=True,
+                        operation_type=operation_type,
+                        ids=[candidate_id],
+                        payload={"already_rejected": True, "candidate": target.to_dict()},
+                    )
                 self._audit(
                     operation_type,
                     operation_id=operation_id,
@@ -146,39 +146,38 @@ class MemoryOperationService:
         candidate_id = str(candidate_id or "").strip()
         if not candidate_id:
             return self._error("promote_candidate", "candidate_id is required")
-        candidates = self.store.list_candidates()
-        target = next((candidate for candidate in candidates if candidate.id == candidate_id), None)
-        if target is None:
-            return self._error("promote_candidate", f"candidate not found: {candidate_id}")
-        if target.proposed_destination.strip().lower() == "skills" or str(getattr(target.type, "value", target.type)) == "procedure_ref":
-            return self._error(
-                "promote_candidate",
-                "procedure/skills candidates require skill authoring or manual rejection, not semantic promotion",
-            )
-        if target.gate_decision != GateDecision.PENDING:
-            decision = getattr(target.gate_decision, "value", str(target.gate_decision))
-            return self._error(
-                "promote_candidate",
-                f"candidate is already {decision}; only pending candidates can be promoted",
-                payload={"candidate": target.to_dict()},
-            )
-
-        gated = self._validate_candidate_sources(target, force=force, force_reason=force_reason)
-        if not gated.success:
-            return gated
-        target = CandidateMemory.from_dict(gated.payload["candidate"])
-
         consolidator = RuleBasedConsolidator()
         promoted_ids: List[str] = []
         superseded_ids: List[str] = []
         operation_id = f"op_{uuid.uuid4().hex}"
         operation_type = "promote_candidate"
         canonical_write_started = False
+        target: Optional[CandidateMemory] = None
         try:
             with self.store.profile_lock():
                 interrupted = self._interrupted_operations()
                 if interrupted:
                     return self._error(operation_type, f"interrupted operation blocks canonical mutation: {interrupted[0]['operation_id']}")
+                candidates = self.store.list_candidates()
+                target = next((candidate for candidate in candidates if candidate.id == candidate_id), None)
+                if target is None:
+                    return self._error(operation_type, f"candidate not found: {candidate_id}")
+                if target.proposed_destination.strip().lower() == "skills" or str(getattr(target.type, "value", target.type)) == "procedure_ref":
+                    return self._error(
+                        operation_type,
+                        "procedure/skills candidates require skill authoring or manual rejection, not semantic promotion",
+                    )
+                if target.gate_decision != GateDecision.PENDING:
+                    decision = getattr(target.gate_decision, "value", str(target.gate_decision))
+                    return self._error(
+                        operation_type,
+                        f"candidate is already {decision}; only pending candidates can be promoted",
+                        payload={"candidate": target.to_dict()},
+                    )
+                gated = self._validate_candidate_sources(target, force=force, force_reason=force_reason)
+                if not gated.success:
+                    return gated
+                target = CandidateMemory.from_dict(gated.payload["candidate"])
                 if consolidator._is_open_loop_candidate(target):
                     operation_type = "route_candidate_to_open_loop"
                     self._audit(operation_type, operation_id=operation_id, status="prepared", actor=actor, reason=target.claim, source_refs=list(target.source_refs), before_ids=[candidate_id], after_ids=[candidate_id], metadata={"candidate_id": candidate_id})
