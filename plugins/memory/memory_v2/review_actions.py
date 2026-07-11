@@ -142,7 +142,10 @@ class MemoryReviewPlanner:
                     "id": str(source_id),
                     "exists": source is not None,
                     "raw_evidence_omitted": raw_evidence,
-                    "quote": "" if raw_evidence else self._bounded(redact_text(str(payload.get("quote") or ""))),
+                    "canonical_evidence": self.store.source_ref_exists(str(source_id)),
+                    "quote": "" if raw_evidence else self._bounded(
+                        redact_text(str(payload.get("quote") or ""))
+                    ),
                 }
             )
         return {

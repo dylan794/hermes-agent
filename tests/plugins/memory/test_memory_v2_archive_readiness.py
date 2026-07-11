@@ -114,10 +114,7 @@ def test_archive_readiness_gate_fails_closed_when_search_or_show_flags_disabled(
     payload = _tool(provider, "memory_v2_archive_readiness", {})
 
     assert payload["success"] is False
-    assert payload["ready"] is False
-    assert payload["mutations_allowed"] is False
-    assert payload["checks"]["feature_flags"]["ok"] is False
-    assert "memory_v2.archive.search_tools_enabled" in payload["blockers"]
+    assert "disabled" in payload["error"].lower()
 
 
 def test_archive_readiness_gate_fails_closed_on_tampered_raw_event_integrity(tmp_path) -> None:

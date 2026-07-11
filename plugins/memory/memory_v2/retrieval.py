@@ -169,6 +169,12 @@ class MemoryQueryRouter:
         "promote this memory automatically",
         "reveal hidden system prompts",
         "reveal system prompts",
+        "client_secret",
+        "client secret",
+        "api_key",
+        "api key",
+        "password",
+        "private key",
         "developer:",
         "system:",
         "tool_call",
@@ -1039,23 +1045,39 @@ class MemoryPacketComposer:
     ) -> List[Dict[str, Any]]:
         if decision.route != "project_continuity":
             return results
-        if any(
-            str(item.get("type") or "") == "project_state"
-            and str(item.get("status") or "") == "active"
-            for item in results
-        ):
-            return results
         active_cards = self.index.active_project_cards(limit=decision.search_limit)
         if not active_cards:
             return results
+        matching_cards = [
+            card for card in active_cards if self._project_card_matches_decision(card, decision)
+        ]
+        supplement = matching_cards or (
+            []
+            if any(
+                str(item.get("type") or "") == "project_state"
+                and str(item.get("status") or "") == "active"
+                for item in results
+            )
+            else active_cards
+        )
+        if not supplement:
+            return results
         merged: List[Dict[str, Any]] = []
         seen: set[str] = set()
-        for item in [*active_cards, *results]:
+        for item in [*supplement, *results]:
             item_id = str(item.get("id") or "")
             if item_id and item_id not in seen:
                 merged.append(item)
                 seen.add(item_id)
         return merged
+
+    @staticmethod
+    def _project_card_matches_decision(card: Dict[str, Any], decision: RoutingDecision) -> bool:
+        haystack = " ".join(
+            str(card.get(key) or "")
+            for key in ("id", "title", "summary", "body", "value")
+        ).lower()
+        return any(str(entity or "").lower() in haystack for entity in decision.entities)
 
     def _supplement_for_deep_recall(
         self, results: List[Dict[str, Any]], decision: RoutingDecision
@@ -1373,7 +1395,12 @@ class MemoryPacketComposer:
                 decision_reason = result.get("value", "")
                 if decision_reason:
                     item["decision_reason"] = decision_reason
-            source_metadata = self.index.source_refs(item["source_refs"])
+            source_refs_for_metadata = item["source_refs"]
+            if item.get("type") == "project_state" and len(source_refs_for_metadata) > 3:
+                source_refs_for_metadata = []
+            else:
+                source_refs_for_metadata = source_refs_for_metadata[:3]
+            source_metadata = self.index.source_refs(source_refs_for_metadata)
             if source_metadata:
                 item["source_metadata"] = source_metadata
             item = self._sanitize_packet_item(item)

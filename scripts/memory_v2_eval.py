@@ -16,14 +16,15 @@ from plugins.memory.memory_v2.evals.baselines import (
     RawFTSBaseline,
     SemanticOnlyBaseline,
 )
-from plugins.memory.memory_v2.evals.datasets import load_eval_dataset
+from plugins.memory.memory_v2.evals.datasets import build_chronological_contract_datasets, load_eval_dataset
 from plugins.memory.memory_v2.evals.reports import write_json_report
 from plugins.memory.memory_v2.evals.runners import run_eval
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run deterministic Memory v2 evaluation fixtures.")
-    parser.add_argument("--dataset", action="append", required=True, help="YAML dataset fixture path. Repeatable.")
+    parser.add_argument("--dataset", action="append", default=[], help="YAML dataset fixture path. Repeatable.")
+    parser.add_argument("--chronological-contracts", action="store_true", help="Also run the built-in synthetic 30/90/365-day chronological contract datasets.")
     parser.add_argument("--baseline", action="append", choices=["no_memory", "raw_fts", "archive_only", "semantic_only", "memory_v2"], default=[])
     parser.add_argument("--workdir", default="", help="Directory for temporary baseline stores.")
     parser.add_argument("--output", default="", help="Write JSON report to this path instead of stdout.")
@@ -40,15 +41,22 @@ def main(argv: list[str] | None = None) -> int:
         workdir = Path(args.workdir).expanduser().resolve() if args.workdir else Path(temp_dir)
         workdir.mkdir(parents=True, exist_ok=True)
         reports = []
+        datasets = []
         for dataset_path in args.dataset:
             try:
-                dataset = load_eval_dataset(dataset_path)
+                datasets.append(load_eval_dataset(dataset_path))
             except FileNotFoundError:
                 print(f"error: dataset not found: {dataset_path}", file=sys.stderr)
                 return 2
             except Exception as exc:
                 print(f"error: failed to load dataset {dataset_path}: {exc}", file=sys.stderr)
                 return 2
+        if args.chronological_contracts:
+            datasets.extend(build_chronological_contract_datasets())
+        if not datasets:
+            print("error: at least one --dataset or --chronological-contracts is required", file=sys.stderr)
+            return 2
+        for dataset in datasets:
             report = run_eval(dataset, baselines=_build_baselines(baseline_names, workdir / dataset.name))
             reports.append(report.to_dict())
 

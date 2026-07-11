@@ -45,8 +45,8 @@ def test_safe_defaults_hide_mutating_and_autonomous_tools(tmp_path) -> None:
 
     names = _tool_names(provider)
 
-    assert "memory_v2_archive_search" in names
-    assert "memory_v2_archive_show" in names
+    assert "memory_v2_archive_search" not in names
+    assert "memory_v2_archive_show" not in names
     assert "memory_v2_session_backfill" not in names
     assert "memory_v2_consolidate" not in names
     assert "memory_v2_daily_report" not in names
@@ -105,11 +105,18 @@ def test_prefetch_is_empty_until_enabled(tmp_path) -> None:
     )
     provider.index.index_raw_event(event)
 
-    assert provider.prefetch("prefetch gated recall needle", session_id="session-flags") == ""
+    query = "What did I say about prefetch gated recall needle?"
+    assert provider.prefetch(query, session_id="session-flags") == ""
 
-    enabled = _provider(tmp_path, {"prefetch": {"enabled": True}})
+    enabled = _provider(
+        tmp_path,
+        {
+            "prefetch": {"enabled": True},
+            "archive": {"enabled": True, "prefetch_raw_enabled": True},
+        },
+    )
     assert "prefetch gated recall needle" in enabled.prefetch(
-        "prefetch gated recall needle", session_id="session-flags"
+        query, session_id="session-flags"
     )
 
 
@@ -464,4 +471,4 @@ def test_contradictions_auto_supersede_requires_feature_flag(tmp_path) -> None:
     payload = _tool_json(provider, "memory_v2_contradictions", {"auto_supersede": True})
 
     assert payload["success"] is False
-    assert "memory_v2.contradictions.auto_supersede" in payload["error"]
+    assert "review" in payload["error"].lower()

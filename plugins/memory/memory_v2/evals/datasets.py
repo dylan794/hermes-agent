@@ -257,3 +257,102 @@ def build_longitudinal_locomo_dataset() -> EvalDataset:
         queries=queries,
         metadata={"benchmark_tier": "smoke"},
     )
+
+
+def build_chronological_contract_datasets() -> list[EvalDataset]:
+    """Build deterministic 30/90/365-day chronological Memory v2 contracts.
+
+    These are synthetic, privacy-safe contract fixtures. They specify honest
+    checkpoint and human-baseline methodology metadata; they do not claim a
+    human win/loss result.
+    """
+
+    methodology = {
+        "mode": "honest_human_timed_open_book",
+        "uses_fixture_answers": False,
+        "allowed_materials": ["event stream", "timestamps", "source ids"],
+        "scoring": "same source/text/suppression metrics as automated baselines",
+        "claim_policy": "report measured human results only; do not infer a winner from methodology",
+    }
+    datasets: list[EvalDataset] = []
+    for days in (30, 90, 365):
+        start_month = {30: 1, 90: 2, 365: 3}[days]
+        events = [
+            EvalEvent(
+                id=f"chrono_{days}_evt_001_goal",
+                session_id=f"chrono-{days}-s1",
+                role="user",
+                created_at=f"2025-{start_month:02d}-01T09:00:00Z",
+                text=f"Project Chronos {days} goal: keep chronological Memory v2 contracts source-grounded.",
+                metadata={"kind": "project_goal", "day_offset": 0},
+            ),
+            EvalEvent(
+                id=f"chrono_{days}_evt_002_pref_old",
+                session_id=f"chrono-{days}-s1",
+                role="user",
+                created_at=f"2025-{start_month:02d}-10T09:00:00Z",
+                text=f"Remember that Chronos {days} notification preference is morning digest.",
+                metadata={"kind": "stale_preference", "day_offset": 9},
+            ),
+            EvalEvent(
+                id=f"chrono_{days}_evt_003_decision",
+                session_id=f"chrono-{days}-s2",
+                role="user",
+                created_at=f"2025-{start_month:02d}-20T09:00:00Z",
+                text=f"Project Chronos {days} decision: restart the provider after ingest checkpoint one.",
+                metadata={"kind": "restart_checkpoint", "day_offset": min(days - 1, 19)},
+            ),
+            EvalEvent(
+                id=f"chrono_{days}_evt_004_pref_new",
+                session_id=f"chrono-{days}-s3",
+                role="user",
+                created_at=f"2025-{start_month:02d}-25T09:00:00Z",
+                text=f"Remember that Chronos {days} notification preference is now afternoon digest.",
+                metadata={"kind": "current_preference", "day_offset": min(days - 1, 24)},
+            ),
+            EvalEvent(
+                id=f"chrono_{days}_evt_005_next",
+                session_id=f"chrono-{days}-s4",
+                role="user",
+                created_at=f"2025-{start_month:02d}-28T09:00:00Z",
+                text=f"Project Chronos {days} next action: rebuild the Memory v2 index and verify retrieval parity.",
+                metadata={"kind": "rebuild_checkpoint", "day_offset": min(days - 1, 27)},
+            ),
+        ]
+        queries = [
+            EvalQuery(
+                id=f"chrono_{days}_q_current_pref",
+                route="preference_recall",
+                text=f"What is the current Chronos {days} notification preference?",
+                expected_answer_contains=["afternoon digest"],
+                expected_source_refs=[f"chrono_{days}_evt_004_pref_new"],
+                forbidden_source_refs=[f"chrono_{days}_evt_002_pref_old"],
+                metadata={"kind": "current_preference", "window_days": days},
+            ),
+            EvalQuery(
+                id=f"chrono_{days}_q_project_next",
+                route="project_continuity",
+                text=f"Where did we leave Project Chronos {days}?",
+                expected_answer_contains=["rebuild the Memory v2 index", "retrieval parity"],
+                expected_source_refs=[f"chrono_{days}_evt_005_next"],
+                metadata={"kind": "restart_rebuild_contract", "window_days": days},
+            ),
+        ]
+        datasets.append(
+            EvalDataset(
+                version=1,
+                name=f"chronological_memory_v2_contract_{days}d_v1",
+                description=f"Synthetic chronological {days}-day Memory v2 contract with restart and index-rebuild checkpoints.",
+                events=events,
+                queries=queries,
+                metadata={
+                    "benchmark_tier": "contract",
+                    "contract_window_days": days,
+                    "ingestion_order": "chronological",
+                    "restart_checkpoint_after_event_ids": [f"chrono_{days}_evt_003_decision"],
+                    "rebuild_index_checkpoint_after_event_ids": [f"chrono_{days}_evt_005_next"],
+                    "human_baseline_methodology": methodology,
+                },
+            )
+        )
+    return datasets

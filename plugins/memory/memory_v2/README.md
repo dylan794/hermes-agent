@@ -10,7 +10,7 @@ The goal is not to stuff more chat history into the model context. The goal is t
 
 ## Status
 
-Memory v2 is a research/prototype memory provider. It is suitable for experimentation, local dogfooding, and evaluating memory architecture ideas, but it should not be treated as a finished memory system yet.
+Memory v2 is a research/prototype memory provider. It is fail-closed and should not be treated as a finished memory system. The [P0 hardening status](../../../docs/memory-v2-p0-status.md) is the source of truth for current guarantees, disabled defaults, benchmark limitations, and verification commands. In particular, the 30/90/365-day benchmark contracts are not currently passing claims.
 
 Current strengths:
 
@@ -426,7 +426,9 @@ The harness compares baselines such as:
 
 - no memory;
 - raw FTS/BM25-style recall;
-- Memory v2 routed recall.
+- Memory v2 routed recall through the initialized provider lifecycle.
+
+The provider-backed eval path uses a temporary feature config to enable archive capture, extraction, consolidation, prefetch, and working-memory packets for the fixture only. The default profile configuration remains fail-closed for mutating/autonomous features.
 
 It scores:
 
@@ -449,7 +451,7 @@ Run the eval CLI against a fixture:
 python scripts/memory_v2_eval.py --dataset plugins/memory/memory_v2/evals/fixtures/local_memory_eval_v1.yaml
 ```
 
-The eval harness is intentionally simple and deterministic. It is a floor, not a final benchmark. The next step is to add larger public benchmarks and optional external-provider adapters without making normal Memory v2 usage depend on those services.
+The eval harness is intentionally simple and deterministic. It is a floor, not a final benchmark. Hard longitudinal fixtures report measured pass/fail checks honestly; they must not be described as proving a human-level, human-winning, or broad Memory-v2-over-raw-FTS claim unless the measured report actually supports that exact claim. The next step is to add larger public benchmarks and optional external-provider adapters without making normal Memory v2 usage depend on those services.
 
 ## Development and tests
 

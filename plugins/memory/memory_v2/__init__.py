@@ -43,6 +43,7 @@ from .schemas import (
     CandidateMemory,
     GateDecision,
     MemoryItem,
+    MemoryType,
     WorkingMemory,
     utc_now_iso,
 )
@@ -371,39 +372,34 @@ REVIEW_APPLY_SCHEMA = {
 
 PROMOTE_SCHEMA = {
     "name": "memory_v2_promote",
-    "description": "Manually promote one pending Memory v2 candidate after source validation.",
+    "description": "Promote one pending candidate only when bound to a fresh confirmed review-plan action.",
     "parameters": {
         "type": "object",
         "properties": {
-            "candidate_id": {
-                "type": "string",
-                "description": "Candidate id to promote.",
-            },
-            "force": {
-                "type": "boolean",
-                "description": "Allow promotion despite missing/dangling source refs.",
-            },
+            "candidate_id": {"type": "string", "description": "Candidate id to promote."},
+            "plan_id": {"type": "string", "description": "Fresh review plan id."},
+            "action_id": {"type": "string", "description": "Promotion action id from that plan."},
+            "candidate_fingerprint": {"type": "string", "description": "Candidate fingerprint from that action."},
+            "confirm": {"type": "string", "description": f"Must equal {CONFIRM_REVIEW_APPLY}."},
         },
-        "required": ["candidate_id"],
+        "required": ["candidate_id", "plan_id", "action_id", "candidate_fingerprint", "confirm"],
     },
 }
 
 REJECT_SCHEMA = {
     "name": "memory_v2_reject",
-    "description": "Manually reject one Memory v2 candidate with an audit reason.",
+    "description": "Reject one pending candidate only when bound to a fresh confirmed review-plan action.",
     "parameters": {
         "type": "object",
         "properties": {
-            "candidate_id": {
-                "type": "string",
-                "description": "Candidate id to reject.",
-            },
-            "reason": {
-                "type": "string",
-                "description": "Human-readable rejection reason.",
-            },
+            "candidate_id": {"type": "string", "description": "Candidate id to reject."},
+            "reason": {"type": "string", "description": "Human-readable rejection reason."},
+            "plan_id": {"type": "string", "description": "Fresh review plan id."},
+            "action_id": {"type": "string", "description": "Rejection action id from that plan."},
+            "candidate_fingerprint": {"type": "string", "description": "Candidate fingerprint from that action."},
+            "confirm": {"type": "string", "description": f"Must equal {CONFIRM_REVIEW_APPLY}."},
         },
-        "required": ["candidate_id", "reason"],
+        "required": ["candidate_id", "reason", "plan_id", "action_id", "candidate_fingerprint", "confirm"],
     },
 }
 
@@ -444,17 +440,13 @@ RESOLVE_OPEN_LOOP_SCHEMA = {
 
 CONTRADICTIONS_SCHEMA = {
     "name": "memory_v2_contradictions",
-    "description": "Build a Memory v2 contradiction/supersession dashboard. Default and candidate modes do not mutate memories; auto_supersede=true may mutate only high-confidence explicit corrections with source evidence.",
+    "description": "Build a non-mutating contradiction dashboard and optionally append pending review candidates. Durable supersession requires the confirmed review-plan path.",
     "parameters": {
         "type": "object",
         "properties": {
             "create_candidates": {
                 "type": "boolean",
                 "description": "If true, append pending contradiction review candidates without superseding or mutating memories.",
-            },
-            "auto_supersede": {
-                "type": "boolean",
-                "description": "If true, automatically supersede only high-confidence explicit corrections with source evidence and audit metadata.",
             },
             "min_confidence": {
                 "type": "number",
@@ -549,9 +541,27 @@ class MemoryV2Provider(MemoryProvider):
         """Return a bounded routed memory packet when indexed recall is relevant."""
         if not self._config.prefetch.enabled:
             return ""
-        effective_session_id = str(session_id or self._session_id or "")
+        effective_session_id = str(self._session_id or "")
         composer = MemoryPacketComposer(self.index)
         packet = composer.compose(query, session_id=effective_session_id)
+        if (
+            self._config.archive.enabled
+            and self._config.archive.prefetch_raw_enabled
+            and packet.route in {"past_conversation_exact", "deep_recall"}
+            and effective_session_id
+        ):
+            raw_items = self._raw_prefetch_items(
+                query,
+                session_id=effective_session_id,
+                limit=min(int(packet.retrieval_plan.get("search_limit") or 3), 3),
+            )
+            if raw_items:
+                raw_ids = {str(item.get("id") or "") for item in raw_items}
+                packet.items = raw_items + [
+                    item for item in packet.items if str(item.get("id") or "") not in raw_ids
+                ]
+                packet.sections = composer._compose_sections(packet.items, composer.router.route(query))
+                packet.warnings = composer._warnings(packet.items)
         sections = dict(packet.sections)
         artifact_section = self._artifact_prefetch_section(query, packet)
         working_section = self._working_prefetch_section(
@@ -565,6 +575,47 @@ class MemoryV2Provider(MemoryProvider):
             sections["working_memory"] = working_section
         packet.sections = sections
         return render_dynamic_memory_packet(packet, include_boundary=True)
+
+    def _raw_prefetch_items(
+        self, query: str, *, session_id: str, limit: int
+    ) -> List[Dict[str, Any]]:
+        """Hydrate a tiny active-session-only raw evidence window.
+
+        Raw JSONL remains canonical; this hot path uses the bounded SQLite byte
+        index and never scans the archive. Every text field is redacted and
+        instruction-escaped before entering model context.
+        """
+        events = self.store.search_raw_events(
+            query=str(query or ""),
+            session_id=str(session_id or ""),
+            limit=max(1, min(int(limit), 3)),
+            index=self.index,
+        )
+        items: List[Dict[str, Any]] = []
+        for event in events:
+            if str(event.get("provider_session_id") or event.get("session_id") or "") != session_id:
+                continue
+            user_text, _ = escape_untrusted_evidence_text(str(event.get("user_content") or event.get("content") or ""))
+            assistant_text, _ = escape_untrusted_evidence_text(str(event.get("assistant_content") or ""))
+            tool_result, _ = escape_untrusted_evidence_text(str(event.get("result") or ""))
+            content = {
+                "user": user_text[:1000],
+                "assistant": assistant_text[:1000],
+            }
+            tool_label, _ = escape_untrusted_evidence_text(str(event.get("tool") or "tool"))
+            if tool_result:
+                content = {"tool": tool_label[:120], "result": tool_result[:1000]}
+            items.append(
+                {
+                    "id": str(event.get("id") or ""),
+                    "type": "raw_event",
+                    "status": "archived",
+                    "created_at": str(event.get("created_at") or ""),
+                    "source_refs": [str(event.get("id") or "")],
+                    "content": content,
+                }
+            )
+        return items
 
     def _artifact_prefetch_section(
         self, query: str, packet: Any
@@ -628,7 +679,14 @@ class MemoryV2Provider(MemoryProvider):
         self._session_id = str(new_session_id or "")
 
     def sync_turn(
-        self, user_content: str, assistant_content: str, *, session_id: str = ""
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        messages: Optional[List[Dict[str, Any]]] = None,
+        event_id: str = "",
+        created_at: str = "",
     ) -> None:
         """Persist a completed turn as raw evidence and conservative candidates.
 
@@ -647,14 +705,19 @@ class MemoryV2Provider(MemoryProvider):
 
         event: Dict[str, Any] | None = None
         if self._config.archive.enabled and self._config.archive.capture_enabled:
-            event = self.store.append_raw_event({
+            raw_event_payload: Dict[str, Any] = {
                 "type": "turn",
-                "session_id": session_id or self._session_id,
+                "session_id": self._session_id,
                 "provider_session_id": self._session_id,
                 "platform": self._platform,
                 "user_content": user_text,
                 "assistant_content": assistant_text,
-            })
+            }
+            if event_id:
+                raw_event_payload["id"] = str(event_id)
+            if created_at:
+                raw_event_payload["created_at"] = str(created_at)
+            event = self.store.append_raw_event(raw_event_payload)
             self.index.index_raw_event(event, index_archive=False)
             if source := self.store.read_source_ref(str(event["id"])):
                 self.index.index_source_ref(source)
@@ -665,7 +728,11 @@ class MemoryV2Provider(MemoryProvider):
             and self._config.extraction.enabled
             and self._config.extraction.candidate_creation_enabled
         ):
-            candidate = self._candidate_from_turn(user_text, event_id=str(event["id"]))
+            candidate = self._candidate_from_turn(
+                user_text,
+                event_id=str(event["id"]),
+                created_at=str(event.get("created_at") or ""),
+            )
             if candidate is not None:
                 if self._candidate_is_obvious_redacted_secret(candidate):
                     candidate = self._candidate_with_decision(
@@ -691,6 +758,13 @@ class MemoryV2Provider(MemoryProvider):
                         self.store.rewrite_candidates(updated_candidates)
                         self.index.index_candidate(duplicate)
                     candidate = duplicate
+        if (
+            messages
+            and self._config.archive.enabled
+            and self._config.archive.capture_enabled
+            and self._config.archive.include_tool_outputs
+        ):
+            self._capture_tool_episodes(messages, created_at=created_at)
         if self._config.working_memory.enabled:
             self._update_working_after_turn(
                 user_text,
@@ -698,6 +772,100 @@ class MemoryV2Provider(MemoryProvider):
                 event_id=str(event["id"]) if event is not None else "",
                 candidate=candidate,
             )
+
+    def _capture_tool_episodes(
+        self, messages: List[Dict[str, Any]], *, created_at: str = ""
+    ) -> None:
+        """Capture only bounded, deduplicated tool-result evidence.
+
+        The completed-turn trajectory may contain the whole conversation, so
+        raw event ids are deterministic from provider session + tool call id.
+        Replaying a later turn therefore cannot duplicate earlier tool output.
+        """
+        tool_names: Dict[str, str] = {}
+        for message in messages:
+            if str(message.get("role") or "") != "assistant":
+                continue
+            for call in message.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                call_id = str(call.get("id") or "").strip()
+                function = call.get("function") or {}
+                if not isinstance(function, dict):
+                    function = {}
+                if call_id:
+                    tool_names[call_id] = str(function.get("name") or "tool")[:120]
+
+        tool_messages = [
+            message
+            for message in messages
+            if isinstance(message, dict) and str(message.get("role") or "") == "tool"
+        ][-10:]
+        for ordinal, message in enumerate(tool_messages):
+            call_id = str(message.get("tool_call_id") or "").strip()
+            dedupe_key = f"{self._session_id}:{call_id or ordinal}"
+            raw_id = f"tool_{hashlib.sha256(dedupe_key.encode('utf-8')).hexdigest()[:24]}"
+            if self.store.raw_event_exists(raw_id, index=self.index):
+                continue
+            tool_name = str(message.get("name") or tool_names.get(call_id) or "tool")[:120]
+            tool_name, _ = escape_untrusted_evidence_text(
+                self._redact_sensitive_text(tool_name)
+            )
+            raw_content = message.get("content")
+            if isinstance(raw_content, (dict, list)):
+                raw_text = json.dumps(raw_content, ensure_ascii=False, sort_keys=True)
+            else:
+                raw_text = str(raw_content or "")
+            try:
+                loaded = json.loads(raw_text)
+                if isinstance(loaded, dict):
+                    raw_text = str(
+                        loaded.get("output")
+                        or loaded.get("result")
+                        or loaded.get("error")
+                        or raw_text
+                    )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            result_text = self._redact_sensitive_text(raw_text).strip()[:2000]
+            if not result_text:
+                continue
+            payload: Dict[str, Any] = {
+                "id": raw_id,
+                "type": "tool",
+                "session_id": self._session_id,
+                "provider_session_id": self._session_id,
+                "platform": self._platform,
+                "tool": tool_name,
+                "tool_call_id": call_id,
+                "result": result_text,
+            }
+            if created_at:
+                payload["created_at"] = str(created_at)
+            raw_event = self.store.append_raw_event(payload)
+            self.index.index_raw_event(raw_event, index_archive=False)
+            if source := self.store.read_source_ref(raw_id):
+                self.index.index_source_ref(source)
+
+            if not (
+                self._config.extraction.enabled
+                and self._config.extraction.candidate_creation_enabled
+            ):
+                continue
+            summary, _ = escape_untrusted_evidence_text(result_text)
+            candidate = CandidateMemory(
+                id=f"cand_{raw_id}",
+                type=MemoryType.EPISODE,
+                claim=f"Tool {tool_name} completed: {summary[:500]}",
+                proposed_destination="episode",
+                confidence=0.8,
+                importance=0.5,
+                promotion_reason="pending: source-backed bounded tool-result episode",
+                source_refs=[raw_id],
+            )
+            if self._find_duplicate_candidate(candidate) is None:
+                self.store.append_candidate(candidate)
+                self.index.index_candidate(candidate)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         schemas = [
@@ -724,7 +892,7 @@ class MemoryV2Provider(MemoryProvider):
         if self._config.consolidation.enabled:
             schemas.extend([CONSOLIDATE_SCHEMA, DAILY_REPORT_SCHEMA, DREAM_CYCLE_SCHEMA])
         if self._config.review_apply.enabled:
-            schemas.extend([REVIEW_APPLY_SCHEMA, PROMOTE_SCHEMA, REJECT_SCHEMA, RESOLVE_OPEN_LOOP_SCHEMA])
+            schemas.extend([REVIEW_APPLY_SCHEMA, PROMOTE_SCHEMA, REJECT_SCHEMA])
         return schemas
 
     def _tool_disabled_error(self, tool_name: str, flag_path: str) -> str:
@@ -734,6 +902,10 @@ class MemoryV2Provider(MemoryProvider):
         })
 
     def _disabled_tool_json(self, tool_name: str) -> str | None:
+        # Open-loop updates have no review-plan action/fingerprint contract yet;
+        # keep the legacy direct mutation handler unreachable from model tools.
+        if tool_name == "memory_v2_resolve_open_loop":
+            return self._tool_disabled_error(tool_name, "review-plan apply path required")
         disabled: dict[str, str] = {}
         if not self._config.archive.enabled:
             disabled.update({
@@ -879,7 +1051,7 @@ class MemoryV2Provider(MemoryProvider):
         return value
 
     def _candidate_from_turn(
-        self, user_text: str, *, event_id: str
+        self, user_text: str, *, event_id: str, created_at: str = ""
     ) -> Optional[CandidateMemory]:
         decision = RuleBasedWriteGate().classify(user_text)
         if not decision.should_create_candidate:
@@ -887,8 +1059,9 @@ class MemoryV2Provider(MemoryProvider):
         reason = decision.reason
         if not reason.lower().startswith(f"{decision.outcome.value}:"):
             reason = f"{decision.outcome.value}: {reason}"
+        candidate_id = f"cand_{self._safe_memory_id_fragment(event_id)}" if event_id else f"cand_{uuid.uuid4().hex}"
         return CandidateMemory(
-            id=f"cand_{uuid.uuid4().hex}",
+            id=candidate_id,
             type=decision.memory_type,
             claim=decision.claim,
             proposed_destination=decision.proposed_destination,
@@ -896,7 +1069,15 @@ class MemoryV2Provider(MemoryProvider):
             importance=decision.importance,
             promotion_reason=reason,
             source_refs=[event_id],
+            created_at=created_at or utc_now_iso(),
         )
+
+    @staticmethod
+    def _safe_memory_id_fragment(value: str) -> str:
+        fragment = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(value or "")).strip("_")
+        if fragment:
+            return fragment[:96]
+        return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
     def _candidate_dedupe_key(candidate: CandidateMemory) -> tuple[str, str, str]:
@@ -1160,10 +1341,10 @@ class MemoryV2Provider(MemoryProvider):
                 "error": "Memory v2 contradiction candidate creation disabled by feature flag: memory_v2.contradictions.create_candidates",
             }
         auto_supersede = bool(args.get("auto_supersede") or False)
-        if auto_supersede and not self._config.contradictions.auto_supersede:
+        if auto_supersede:
             return {
                 "success": False,
-                "error": "Memory v2 contradiction auto-supersede disabled by feature flag: memory_v2.contradictions.auto_supersede",
+                "error": "Direct contradiction auto-supersession is disabled; create review candidates and apply a confirmed review plan",
             }
         try:
             min_confidence = float(args.get("min_confidence") or 0.9)
@@ -1649,22 +1830,68 @@ class MemoryV2Provider(MemoryProvider):
         )
 
     def _reject_candidate(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        validated = self._validated_direct_mutation_action(args, expected_operation="reject_candidate")
+        if validated.get("success") is False:
+            return validated
+        action = validated["action"]
         result = MemoryOperationService(self.store, self.index).reject_candidate(
             str(args.get("candidate_id") or ""),
-            str(args.get("reason") or ""),
-            actor="manual_tool",
+            str(args.get("reason") or action.get("reason") or "reviewed rejection"),
+            actor="manual_tool_review_plan",
         )
         return result.to_dict()
 
     def _promote_candidate(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        if bool(args.get("force") or False) or args.get("force_reason"):
+            return {
+                "success": False,
+                "error": "Forced promotion is not available through model tools; canonical source evidence is required",
+            }
+        validated = self._validated_direct_mutation_action(args, expected_operation="promote_candidate")
+        if validated.get("success") is False:
+            return validated
         result = MemoryOperationService(self.store, self.index).promote_candidate(
             str(args.get("candidate_id") or ""),
-            force=bool(args.get("force") or False),
-            force_reason=str(args.get("force_reason") or ""),
+            force=False,
             session_id=self._session_id,
-            actor="manual_tool",
+            actor="manual_tool_review_plan",
         )
         return result.to_dict()
+
+    def _validated_direct_mutation_action(self, args: Dict[str, Any], *, expected_operation: str) -> Dict[str, Any]:
+        """Require review-plan confirmation before direct provider mutation tools mutate.
+
+        The provider-level convenience tools are model-callable, so they must not
+        be a shortcut around the review-plan/action fingerprint contract.  The
+        lower-level MemoryOperationService remains usable for internal code and
+        tests that already made an explicit local decision.
+        """
+        if str(args.get("confirm") or "") != CONFIRM_REVIEW_APPLY:
+            return {"success": False, "error": f"review plan confirm must equal {CONFIRM_REVIEW_APPLY}"}
+        candidate_id = str(args.get("candidate_id") or "").strip()
+        plan_id = str(args.get("plan_id") or "").strip()
+        action_id = str(args.get("action_id") or "").strip()
+        fingerprint = str(args.get("candidate_fingerprint") or "").strip()
+        if not candidate_id:
+            return {"success": False, "error": "candidate_id is required"}
+        if not plan_id or not action_id or not fingerprint:
+            return {
+                "success": False,
+                "error": "review plan_id, action_id, and candidate_fingerprint are required for direct mutation tools",
+            }
+        plan = MemoryReviewPlanner(self.store).build(candidate_ids=[candidate_id])
+        if plan.get("plan_id") != plan_id:
+            return {"success": False, "error": "review plan is stale; regenerate memory_v2_review_plan"}
+        action = next((item for item in plan.get("actions") or [] if item.get("action_id") == action_id), None)
+        if action is None:
+            return {"success": False, "error": "review plan action_id is unknown or blocked for this candidate"}
+        if str(action.get("candidate_id") or "") != candidate_id:
+            return {"success": False, "error": "review plan action candidate_id mismatch"}
+        if str(action.get("operation") or "") != expected_operation:
+            return {"success": False, "error": f"review plan action is {action.get('operation')}, not {expected_operation}"}
+        if str(action.get("candidate_fingerprint") or "") != fingerprint:
+            return {"success": False, "error": "candidate fingerprint does not match review plan action"}
+        return {"success": True, "action": action}
 
     def _session_backfill_payload(self, args: Dict[str, Any]) -> Dict[str, Any]:
         if self._hermes_home is None:

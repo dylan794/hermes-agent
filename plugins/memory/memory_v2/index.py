@@ -423,6 +423,7 @@ class MemoryV2Index:
             card.goal,
             card.why_it_matters,
             card.current_state,
+            f"status: {cast(ProjectStatus, card.status).value}",
             "\n".join(card.decisions),
             "\n".join(card.open_questions),
             "\n".join(card.next_actions),

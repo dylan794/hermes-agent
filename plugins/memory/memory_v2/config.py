@@ -23,6 +23,11 @@ class ArchiveFlags:
     # into each read surface after enabling the provider for a profile.
     search_tools_enabled: bool = False
     show_tools_enabled: bool = False
+    # Internal raw-evidence hydration for exact/deep prefetch remains a separate
+    # fail-closed opt-in from model-visible archive tools.
+    prefetch_raw_enabled: bool = False
+    # When capture is enabled, preserve bounded/redacted tool results as raw
+    # evidence and pending work-episode candidates.
     include_tool_outputs: bool = False
 
 
@@ -131,6 +136,7 @@ def load_memory_v2_config(hermes_home: str | Path | None) -> MemoryV2FeatureFlag
             backfill_enabled=_bool(archive, "backfill_enabled", defaults.archive.backfill_enabled),
             search_tools_enabled=_bool(archive, "search_tools_enabled", defaults.archive.search_tools_enabled),
             show_tools_enabled=_bool(archive, "show_tools_enabled", defaults.archive.show_tools_enabled),
+            prefetch_raw_enabled=_bool(archive, "prefetch_raw_enabled", defaults.archive.prefetch_raw_enabled),
             include_tool_outputs=_bool(archive, "include_tool_outputs", defaults.archive.include_tool_outputs),
         ),
         extraction=ExtractionFlags(

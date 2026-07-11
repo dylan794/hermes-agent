@@ -26,10 +26,10 @@ The eval harness is not a full agent benchmark. It exercises the memory ingestio
 Local deterministic baselines are implemented under `plugins/memory/memory_v2/evals/`:
 
 - `no_memory` — returns no memory. This is the floor for recall and a useful control for suppression.
-- `raw_fts` — indexes raw event text with SQLite FTS and retrieves lexical matches. This tests whether Memory v2 beats simple log search.
+- `raw_fts` — indexes raw event text with SQLite FTS and retrieves lexical matches. This tests whether routed Memory v2 recall adds value over simple log search on a given fixture; reports must not turn one fixture result into a broad win claim.
 - `archive_only` — indexes bounded raw archive evidence without promoted candidates; useful for separating archive recall from consolidation behavior.
 - `semantic_only` — runs the Memory v2 write/consolidation path under a separate label for longitudinal comparisons.
-- `memory_v2` — runs the Memory v2 fixture path through the real local write gate, consolidation, index, router, and packet composer.
+- `memory_v2` — initializes the actual `MemoryV2Provider` under an explicit temporary `config.yaml`, ingests events through `sync_turn(event_id=..., created_at=...)`, runs consolidation through the provider tool, and retrieves the production `prefetch()` packet. It does not use fixture route/oracle labels or eval-only precision filters.
 
 External adapter status helpers live in `plugins/memory/memory_v2/evals/adapters.py`, but local regression commands do not require external providers, API keys, or network access.
 
@@ -61,6 +61,16 @@ python scripts/memory_v2_eval.py \
   --baseline memory_v2
 ```
 
+Run the built-in chronological 30/90/365-day contracts. These contracts ingest events in timestamp order and include restart plus index-rebuild checkpoints for provider-backed baselines:
+
+```bash
+python scripts/memory_v2_eval.py \
+  --chronological-contracts \
+  --baseline raw_fts \
+  --baseline memory_v2 \
+  --no-fail-on-acceptance
+```
+
 Write a JSON report to a file:
 
 ```bash
@@ -75,24 +85,9 @@ Run eval unit tests:
 python -m pytest tests/plugins/memory/evals -q
 ```
 
-Run dogfood scenarios and embed the local eval summary in the dogfood report:
+## Dogfood status
 
-```bash
-python -m plugins.memory.memory_v2.dogfood \
-  --target-home ~/.hermes/profiles/memory-v2-dogfood \
-  --source-home ~/.hermes \
-  --default-home ~/.hermes \
-  --fresh \
-  --run-local-eval
-```
-
-For release/regression work, run:
-
-```bash
-source venv/bin/activate 2>/dev/null || source .venv/bin/activate 2>/dev/null || true
-python -m pytest tests/plugins/memory/test_memory_v2_dogfood.py tests/plugins/memory/evals -q
-python -m ruff check plugins/memory/memory_v2/dogfood.py tests/plugins/memory/test_memory_v2_dogfood.py -q
-```
+Live/fresh dogfood and frontier workflows are deliberately deferred until the P0 benchmark gates improve. Recovered pre-P0 tests for those workflows remain strict expected failures; do not treat them as release gates or enable live dogfood from this branch.
 
 ## Adding fixtures
 
@@ -127,6 +122,7 @@ Recommended process:
 ## Limitations
 
 - The harness is deterministic and local; it does not measure LLM answer quality or full multi-turn agent behavior.
+- Human-baseline methodology is documented as timed, open-book, source-grounded scoring that does not use fixture answers. It is methodology only until measured human rows are actually collected; do not claim a human, raw-FTS, or Memory-v2 win from methodology text alone.
 - Substring scoring can miss semantically correct paraphrases and can over-reward copied text.
 - The fixtures are intentionally small, so passing them is a regression signal, not proof of broad memory quality.
 - Latency numbers are local-machine dependent and should be interpreted as rough smoke signals.

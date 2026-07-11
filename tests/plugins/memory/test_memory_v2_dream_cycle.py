@@ -224,8 +224,8 @@ def test_dream_cycle_compacts_review_plan_source_quotes_in_persisted_report(tmp_
 
     assert "Sensitive source quote" not in report_json
     sources = persisted_report["review_plan"]["actions"][0]["source_check"]["sources"]
-    assert sources[0]["has_quote"] is True
-    assert sources[0]["quote_sha256"]
+    assert sources[0]["has_quote"] is False
+    assert sources[0]["quote_sha256"] == ""
     assert "quote" not in sources[0]
 
 

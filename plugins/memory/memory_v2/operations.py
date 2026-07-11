@@ -13,6 +13,7 @@ places.  The goals are deliberately boring and important:
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -74,24 +75,61 @@ class MemoryOperationService:
                 payload={"already_rejected": True, "candidate": target.to_dict()},
             )
 
-        rejected = self._candidate_with_decision(target, GateDecision.REJECTED, reason)
-        updated_candidates = [rejected if candidate.id == candidate_id else candidate for candidate in candidates]
-        self.store.rewrite_candidates(updated_candidates)
-        self.store.append_rejected_candidate(rejected)
-        self.index.index_candidate(rejected)
-        op = self._audit(
-            "reject_candidate",
-            actor=actor,
-            reason=reason,
-            source_refs=list(rejected.source_refs),
-            before_ids=[candidate_id],
-            after_ids=[candidate_id],
-            metadata={"gate_decision": "rejected"},
-        )
+        operation_id = f"op_{uuid.uuid4().hex}"
+        operation_type = "reject_candidate"
+        canonical_write_started = False
+        try:
+            with self.store.profile_lock():
+                interrupted = self._interrupted_operations()
+                if interrupted:
+                    return self._error(operation_type, f"interrupted operation blocks canonical mutation: {interrupted[0]['operation_id']}")
+                self._audit(
+                    operation_type,
+                    operation_id=operation_id,
+                    status="prepared",
+                    actor=actor,
+                    reason=reason,
+                    source_refs=list(target.source_refs),
+                    before_ids=[candidate_id],
+                    after_ids=[candidate_id],
+                    metadata={"gate_decision": "rejected"},
+                )
+                self._maybe_failpoint("after_operation_prepare")
+                rejected = self._candidate_with_decision(target, GateDecision.REJECTED, reason)
+                updated_candidates = [rejected if candidate.id == candidate_id else candidate for candidate in candidates]
+                canonical_write_started = True
+                self.store.rewrite_candidates(updated_candidates)
+                self._maybe_failpoint("after_reject_candidates_rewrite")
+                self.store.append_rejected_candidate(rejected)
+                self.index.index_candidate(rejected)
+                self._audit(
+                    operation_type,
+                    operation_id=operation_id,
+                    status="committed",
+                    actor=actor,
+                    reason=reason,
+                    source_refs=list(rejected.source_refs),
+                    before_ids=[candidate_id],
+                    after_ids=[candidate_id],
+                    metadata={"gate_decision": "rejected"},
+                )
+        except Exception as exc:
+            self._audit(
+                operation_type,
+                operation_id=operation_id,
+                status="recovery_required" if canonical_write_started else "failed",
+                actor=actor,
+                reason=reason,
+                source_refs=list(getattr(target, "source_refs", [])),
+                before_ids=[candidate_id],
+                after_ids=[candidate_id],
+                metadata={"error": str(exc)},
+            )
+            return self._error(operation_type, str(exc))
         return MemoryOperationResult(
             success=True,
-            operation_id=op["operation_id"],
-            operation_type="reject_candidate",
+            operation_id=operation_id,
+            operation_type=operation_type,
             ids=[candidate_id],
             payload={"candidate": rejected.to_dict()},
         )
@@ -133,59 +171,83 @@ class MemoryOperationService:
         consolidator = RuleBasedConsolidator()
         promoted_ids: List[str] = []
         superseded_ids: List[str] = []
-
-        if consolidator._is_open_loop_candidate(target):
-            existing_loop = next((loop for loop in self.store.list_open_loops() if loop.get("candidate_id") == target.id), None)
-            loop = existing_loop or self.store.upsert_open_loop(
-                {"text": target.claim, "source_refs": target.source_refs, "session_id": session_id, "candidate_id": target.id}
-            )
-            self.index.index_open_loop(loop, file_path=self.store.open_loops_path)
-            updated_target = self._candidate_with_decision(
-                target, GateDecision.ARCHIVED_ONLY, f"Manually routed to working/open_loops.yaml as {loop['id']}."
-            )
-            promoted_ids.append(str(loop["id"]))
-            operation_type = "route_candidate_to_open_loop"
-        elif consolidator._is_project_card_candidate(target):
-            card = consolidator._merge_project_card(target, self.store)
-            path = self.store.write_project_card(card)
-            self.index.index_project_card(card, file_path=path)
-            updated_target = self._candidate_with_decision(target, GateDecision.PROMOTED, f"Manually promoted to ProjectCard {card.id}.")
-            promoted_ids.append(card.id)
-            operation_type = "promote_candidate_to_project_card"
-        else:
-            item = consolidator._memory_item_from_candidate(target)
-            superseded = consolidator._superseded_items_for(target, item, self.store)
-            if superseded:
-                item.supersedes = [old.id for old in superseded]
-                for old in superseded:
-                    self._apply_supersession_fields(
-                        old,
-                        superseded_by=item.id,
-                        reason=f"Superseded by candidate promotion {target.id}.",
-                        tag="candidate_superseded",
+        operation_id = f"op_{uuid.uuid4().hex}"
+        operation_type = "promote_candidate"
+        canonical_write_started = False
+        try:
+            with self.store.profile_lock():
+                interrupted = self._interrupted_operations()
+                if interrupted:
+                    return self._error(operation_type, f"interrupted operation blocks canonical mutation: {interrupted[0]['operation_id']}")
+                if consolidator._is_open_loop_candidate(target):
+                    operation_type = "route_candidate_to_open_loop"
+                    self._audit(operation_type, operation_id=operation_id, status="prepared", actor=actor, reason=target.claim, source_refs=list(target.source_refs), before_ids=[candidate_id], after_ids=[candidate_id], metadata={"candidate_id": candidate_id})
+                    existing_loop = next((loop for loop in self.store.list_open_loops() if loop.get("candidate_id") == target.id), None)
+                    canonical_write_started = True
+                    loop = existing_loop or self.store.upsert_open_loop(
+                        {"text": target.claim, "source_refs": target.source_refs, "session_id": session_id, "candidate_id": target.id}
                     )
-                    path = self.store.write_memory_item(old)
-                    self.index.index_memory_item(old, file_path=path)
-                    superseded_ids.append(old.id)
-            path = self.store.write_memory_item(item)
-            self.index.index_memory_item(item, file_path=path)
-            updated_target = self._candidate_with_decision(target, GateDecision.PROMOTED, f"Manually promoted to MemoryItem {item.id}.")
-            promoted_ids.append(item.id)
-            operation_type = "promote_candidate_to_memory_item"
+                    self._maybe_failpoint("after_promote_open_loop_write")
+                    self.index.index_open_loop(loop, file_path=self.store.open_loops_path)
+                    updated_target = self._candidate_with_decision(
+                        target, GateDecision.ARCHIVED_ONLY, f"Manually routed to working/open_loops.yaml as {loop['id']}."
+                    )
+                    promoted_ids.append(str(loop["id"]))
+                elif consolidator._is_project_card_candidate(target):
+                    operation_type = "promote_candidate_to_project_card"
+                    self._audit(operation_type, operation_id=operation_id, status="prepared", actor=actor, reason=target.claim, source_refs=list(target.source_refs), before_ids=[candidate_id], after_ids=[candidate_id], metadata={"candidate_id": candidate_id})
+                    card = consolidator._merge_project_card(target, self.store)
+                    canonical_write_started = True
+                    path = self.store.write_project_card(card)
+                    self._maybe_failpoint("after_promote_project_card_write")
+                    self.index.index_project_card(card, file_path=path)
+                    updated_target = self._candidate_with_decision(target, GateDecision.PROMOTED, f"Manually promoted to ProjectCard {card.id}.")
+                    promoted_ids.append(card.id)
+                else:
+                    operation_type = "promote_candidate_to_memory_item"
+                    item = consolidator._memory_item_from_candidate(target)
+                    superseded = consolidator._superseded_items_for(target, item, self.store)
+                    after_ids_preview = [item.id, candidate_id]
+                    self._audit(operation_type, operation_id=operation_id, status="prepared", actor=actor, reason=target.claim, source_refs=list(target.source_refs), before_ids=[candidate_id] + [old.id for old in superseded], after_ids=after_ids_preview, metadata={"candidate_id": candidate_id})
+                    if superseded:
+                        item.supersedes = [old.id for old in superseded]
+                        for old in superseded:
+                            self._apply_supersession_fields(
+                                old,
+                                superseded_by=item.id,
+                                reason=f"Superseded by candidate promotion {target.id}.",
+                                tag="candidate_superseded",
+                            )
+                            canonical_write_started = True
+                            path = self.store.write_memory_item(old)
+                            self._maybe_failpoint("after_promote_memory_item_write")
+                            self.index.index_memory_item(old, file_path=path)
+                            superseded_ids.append(old.id)
+                    canonical_write_started = True
+                    path = self.store.write_memory_item(item)
+                    self._maybe_failpoint("after_promote_memory_item_write")
+                    self.index.index_memory_item(item, file_path=path)
+                    updated_target = self._candidate_with_decision(target, GateDecision.PROMOTED, f"Manually promoted to MemoryItem {item.id}.")
+                    promoted_ids.append(item.id)
 
-        self._validate_memory_items_invariants()
-        updated_candidates = [updated_target if candidate.id == candidate_id else candidate for candidate in candidates]
-        self.store.rewrite_candidates(updated_candidates)
-        self.index.index_candidate(updated_target)
-        op = self._audit(
-            operation_type,
-            actor=actor,
-            reason=updated_target.decision_reason,
-            source_refs=list(updated_target.source_refs),
-            before_ids=[candidate_id] + superseded_ids,
-            after_ids=promoted_ids + [candidate_id],
-            metadata={"candidate_id": candidate_id, "promoted_ids": promoted_ids, "superseded_ids": superseded_ids},
-        )
+                self._validate_memory_items_invariants()
+                updated_candidates = [updated_target if candidate.id == candidate_id else candidate for candidate in candidates]
+                self.store.rewrite_candidates(updated_candidates)
+                self.index.index_candidate(updated_target)
+                op = self._audit(
+                    operation_type,
+                    operation_id=operation_id,
+                    status="committed",
+                    actor=actor,
+                    reason=updated_target.decision_reason,
+                    source_refs=list(updated_target.source_refs),
+                    before_ids=[candidate_id] + superseded_ids,
+                    after_ids=promoted_ids + [candidate_id],
+                    metadata={"candidate_id": candidate_id, "promoted_ids": promoted_ids, "superseded_ids": superseded_ids},
+                )
+        except Exception as exc:
+            self._audit(operation_type, operation_id=operation_id, status="recovery_required" if canonical_write_started else "failed", actor=actor, reason=str(exc), source_refs=list(getattr(target, "source_refs", [])), before_ids=[candidate_id] + superseded_ids, after_ids=promoted_ids + [candidate_id], metadata={"error": str(exc)})
+            return self._error(operation_type, str(exc))
         return MemoryOperationResult(
             success=True,
             operation_id=op["operation_id"],
@@ -368,10 +430,14 @@ class MemoryOperationService:
         before_ids: List[str],
         after_ids: List[str],
         metadata: Dict[str, Any] | None = None,
+        operation_id: str = "",
+        status: str = "committed",
     ) -> Dict[str, Any]:
         operation = {
-            "operation_id": f"op_{uuid.uuid4().hex}",
+            "operation_id": operation_id or f"op_{uuid.uuid4().hex}",
             "type": operation_type,
+            "operation": operation_type,
+            "status": str(status or "committed"),
             "actor": str(actor or ""),
             "reason": str(reason or ""),
             "source_refs": self._unique(source_refs),
@@ -382,6 +448,19 @@ class MemoryOperationService:
         }
         self.store.append_operation_record(operation)
         return operation
+
+    def _interrupted_operations(self) -> List[Dict[str, Any]]:
+        latest: Dict[str, Dict[str, Any]] = {}
+        for record in self.store.list_operation_records():
+            operation_id = str(record.get("operation_id") or "").strip()
+            if operation_id:
+                latest[operation_id] = record
+        return [record for record in latest.values() if str(record.get("status") or "") in {"prepared", "recovery_required"}]
+
+    @staticmethod
+    def _maybe_failpoint(name: str) -> None:
+        if os.environ.get("MEMORY_V2_FAILPOINT") == name:
+            raise RuntimeError(f"Memory v2 failpoint triggered: {name}")
 
     @staticmethod
     def _unique(values: List[str]) -> List[str]:

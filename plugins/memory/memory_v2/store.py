@@ -7,14 +7,18 @@ provides safe local persistence for raw events, candidates, and project cards.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import threading
+import time
 import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
+
+import fcntl
 
 import yaml
 
@@ -77,6 +81,7 @@ _RAW_EVENT_TRANSIENT_FIELDS = {
 }
 _RAW_EVENT_CONTENT_LIMIT = 24_000
 _RAW_EVENT_TOOL_CONTENT_LIMIT = 8_000
+_DEFAULT_PROFILE_LOCK_TIMEOUT_SECONDS = 5.0
 
 
 class MemoryV2Store:
@@ -172,6 +177,10 @@ class MemoryV2Store:
         for rel in MEMORY_V2_DIRS:
             (self.base_dir / rel).mkdir(parents=True, exist_ok=True)
 
+        lock_path = self.base_dir / "audit" / "profile.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.touch(exist_ok=True)
+
         readme = self.base_dir / "README.md"
         if not readme.exists():
             self._atomic_write_text(
@@ -205,7 +214,34 @@ class MemoryV2Store:
         # created by the layout above; the JSONL file is created lazily by the
         # first audited operation.
 
-    def append_raw_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+    @property
+    def profile_lock_path(self) -> Path:
+        return self.base_dir / "audit" / "profile.lock"
+
+    @contextlib.contextmanager
+    def profile_lock(self, *, timeout: float = _DEFAULT_PROFILE_LOCK_TIMEOUT_SECONDS):
+        """Hold the profile-wide mutation lock with a bounded timeout.
+
+        The lock protects all canonical Memory v2 mutations across processes.
+        Callers fail closed instead of proceeding without the lock.
+        """
+        self.profile_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self.profile_lock_path.open("a+b") as fh:
+            while True:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise ValidationError("Memory v2 profile lock timeout; refusing to mutate without exclusive lock") from exc
+                    time.sleep(0.01)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    def append_raw_event(self, event: Dict[str, Any], *, lock_timeout: float = _DEFAULT_PROFILE_LOCK_TIMEOUT_SECONDS) -> Dict[str, Any]:
         """Append a redacted, tamper-evident raw event to ``inbox/raw_events.jsonl``.
 
         The raw archive is the evidence layer for Memory v2.  It is append-only,
@@ -215,10 +251,10 @@ class MemoryV2Store:
         """
         if not isinstance(event, dict):
             raise ValidationError("raw event must be a JSON object")
-        with self._raw_event_lock:
+        with self.profile_lock(timeout=lock_timeout), self._raw_event_lock:
             previous = self._last_raw_event_for_chain()
             payload = self._normalize_raw_event(event, previous=previous)
-            byte_offset, byte_length = self._append_jsonl(self.raw_events_path, payload)
+            byte_offset, byte_length = self._append_jsonl(self.raw_events_path, payload, fsync=True)
             self.write_source_ref(self._source_ref_from_raw_event(payload))
             self._update_raw_archive_manifest_after_append(payload)
             self._update_derived_raw_index_after_append(payload, byte_offset=byte_offset, byte_length=byte_length)
@@ -371,7 +407,17 @@ class MemoryV2Store:
                     return self.raw_event_exists(raw_id, index=index)
                 except ValidationError:
                     return False
-            return True
+            uri = str(source.uri or "").strip()
+            if uri.lower().startswith("artifact:"):
+                artifact_id = uri.split(":", 1)[1].strip()
+                return bool(artifact_id and self.read_artifact_record(artifact_id) is not None)
+            if uri.lower().startswith("memory:"):
+                memory_id = uri.split(":", 1)[1].strip()
+                return any(item.id == memory_id for item in self.list_memory_items())
+            # A writable SourceRef sidecar is metadata, not proof. Manual, web,
+            # file, session, and message labels require a canonical raw/artifact/
+            # memory record before they can ground promotion.
+            return False
         try:
             return self.raw_event_exists(safe_id, index=index)
         except ValidationError:
@@ -570,30 +616,20 @@ class MemoryV2Store:
             manifest["updated_at"] = utc_now_iso()
             self._atomic_write_yaml(self.raw_archive_manifest_path, manifest)
             return
+        last_error: Exception | None = None
         try:
             from .index import MemoryV2Index
 
-            index = MemoryV2Index(db_path)
-            index.initialize()
-            line_no = int(event.get("chain_index") or 0) + 1
-            if index.index_raw_archive_event(
-                event,
-                byte_offset=byte_offset,
-                byte_length=byte_length,
-                line_no=line_no,
-            ):
-                self.update_raw_archive_index_status(
-                    derived_index_status="ok",
-                    indexed_event_count=index.raw_event_count(),
-                    last_indexed_record_sha256=str(event.get("record_sha256") or ""),
-                    raw_index_schema_version=index.raw_index_schema_version(),
-                )
-        except Exception:
-            # The JSONL archive is canonical; indexing must never make append fail.
-            manifest = self.read_raw_archive_manifest()
-            manifest["derived_index_status"] = "stale"
-            manifest["updated_at"] = utc_now_iso()
-            self._atomic_write_yaml(self.raw_archive_manifest_path, manifest)
+            MemoryV2Index(db_path).rebuild_from_store(self)
+            return
+        except Exception as exc:
+            last_error = exc
+        # The JSONL archive is canonical; indexing must never make append fail.
+        manifest = self.read_raw_archive_manifest()
+        manifest["derived_index_status"] = "stale"
+        manifest["index_error"] = str(last_error or "unknown index update failure")[:500]
+        manifest["updated_at"] = utc_now_iso()
+        self._atomic_write_yaml(self.raw_archive_manifest_path, manifest)
 
     def verify_raw_archive(self) -> Dict[str, Any]:
         """Return a privacy-safe integrity report for the raw JSONL archive."""

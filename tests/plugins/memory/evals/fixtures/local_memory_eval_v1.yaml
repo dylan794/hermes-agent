@@ -10,7 +10,7 @@ events:
   - id: event_project_001
     session_id: sess_project
     role: user
-    text: "Project Memory v2 next action: add source-grounded evals."
+    text: "Remember that Project Memory v2 next action: add source-grounded evals."
     expected_candidate_type: project_state
 queries:
   - id: q_pref_001

@@ -163,6 +163,7 @@ class RuleBasedConsolidator:
             if self._is_open_loop_candidate(candidate):
                 loop = store.upsert_open_loop(
                     {
+                        "id": f"loop_{candidate.id}",
                         "text": candidate.claim,
                         "source_refs": candidate.source_refs,
                         "session_id": self._session_id_from_source(candidate),

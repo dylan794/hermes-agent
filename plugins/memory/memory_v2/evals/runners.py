@@ -22,7 +22,11 @@ from plugins.memory.memory_v2.retrieval import MemoryQueryRouter
 def run_eval(dataset: EvalDataset, *, baselines: list[MemoryEvalBaseline]) -> EvalReport:
     rows: list[EvalScoreRow] = []
     for baseline in baselines:
-        baseline.ingest(dataset.events)
+        ingest_dataset = getattr(baseline, "ingest_dataset", None)
+        if callable(ingest_dataset):
+            ingest_dataset(dataset)
+        else:
+            baseline.ingest(dataset.events)
         consolidate = getattr(baseline, "consolidate", None)
         if callable(consolidate):
             consolidate()

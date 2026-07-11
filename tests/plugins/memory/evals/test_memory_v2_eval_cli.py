@@ -215,7 +215,7 @@ queries:
     assert hard_check["passed"] is False
 
 
-def test_memory_v2_eval_cli_hard_benchmark_passes_when_memory_v2_beats_raw_fts(tmp_path):
+def test_memory_v2_eval_cli_hard_benchmark_reports_current_measured_failure_honestly(tmp_path):
     output_path = tmp_path / "hard_report.json"
     completed = subprocess.run(
         [
@@ -239,8 +239,9 @@ def test_memory_v2_eval_cli_hard_benchmark_passes_when_memory_v2_beats_raw_fts(t
         capture_output=True,
     )
 
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 1
+    assert "acceptance failed" in completed.stderr
     payload = json.loads(output_path.read_text(encoding="utf-8"))
-    assert payload["acceptance"]["passed"] is True
+    assert payload["acceptance"]["passed"] is False
     hard_check = next(check for check in payload["acceptance"]["checks"] if check["name"] == "memory_v2_beats_raw_fts_source_recall")
-    assert hard_check["passed"] is True
+    assert hard_check["passed"] is False

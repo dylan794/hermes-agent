@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from plugins.memory.memory_v2.evals.baselines import MemoryV2Baseline, NoMemoryBaseline, RawFTSBaseline
 from plugins.memory.memory_v2.evals.datasets import EvalEvent, EvalQuery, load_eval_dataset
@@ -249,7 +250,7 @@ def test_hard_longitudinal_fixture_forbids_known_decoy_and_stale_false_pass_refs
         assert required_refs <= forbidden_by_query[query_id]
 
 
-def test_hard_longitudinal_benchmark_memory_v2_passes_and_beats_raw_fts(tmp_path):
+def test_hard_longitudinal_benchmark_reports_without_eval_only_precision_or_win_claim(tmp_path):
     hard_fixture = Path(__file__).parents[4] / "plugins/memory/memory_v2/evals/fixtures/hard_longitudinal_memory_v2_v1.yaml"
     dataset = load_eval_dataset(hard_fixture)
 
@@ -260,15 +261,12 @@ def test_hard_longitudinal_benchmark_memory_v2_passes_and_beats_raw_fts(tmp_path
     payload = report.to_dict()
     checks = {check["name"]: check for check in payload["acceptance"]["checks"]}
 
-    assert payload["acceptance"]["passed"] is True
-    assert checks["memory_v2_beats_raw_fts_source_recall"]["passed"] is True
-    assert payload["summary"]["memory_v2"]["source_recall_avg"] > payload["summary"]["raw_fts"]["source_recall_avg"]
-    assert payload["summary"]["memory_v2"]["text_contains_avg"] == 1.0
-    assert payload["summary"]["memory_v2"]["suppression_avg"] == 1.0
-    for row in payload["rows"]:
-        if row["baseline"] == "memory_v2":
-            assert row["privacy_leakage"] == 0.0
-            assert row["adversarial_instruction_following"] == 0.0
+    assert payload["summary"]["memory_v2"]["query_count"] == len(dataset.queries)
+    assert payload["summary"]["raw_fts"]["query_count"] == len(dataset.queries)
+    assert checks["missing_required_baselines"]["passed"] is True
+    assert "memory_v2_beats_raw_fts_source_recall" in checks
+    assert isinstance(checks["memory_v2_beats_raw_fts_source_recall"]["passed"], bool)
+    assert payload["acceptance"]["passed"] is all(check["passed"] for check in checks.values())
 
 
 def test_hard_acceptance_requires_strict_memory_v2_source_recall_win():
@@ -373,3 +371,113 @@ def test_hard_acceptance_rejects_forbidden_decoy_and_stale_source_refs():
     assert forbidden_check["passed"] is False
     assert forbidden_check["failed_rows"][0]["forbidden_source_refs_present"] == ["decoy_project", "stale_fact"]
     assert scorecard["passed"] is False
+
+
+def test_memory_v2_baseline_packet_equals_direct_provider_prefetch_for_same_state(tmp_path):
+    from plugins.memory.memory_v2 import MemoryV2Provider
+
+    events = [
+        EvalEvent(
+            id="event_pref_direct",
+            session_id="session-direct",
+            role="user",
+            created_at="2026-02-01T09:00:00Z",
+            text="Remember that Alex prefers direct packet equality checks.",
+        )
+    ]
+    query = EvalQuery(
+        id="q_direct",
+        route="preference_recall",
+        text="What packet equality check does Alex prefer?",
+        expected_source_refs=["event_pref_direct"],
+        expected_answer_contains=["direct packet equality checks"],
+        metadata={"provider_session_id": "session-direct"},
+    )
+    baseline = MemoryV2Baseline(tmp_path / "baseline")
+    baseline.ingest(events)
+    baseline.consolidate()
+
+    direct_home = tmp_path / "direct"
+    baseline._write_eval_config()
+    (direct_home / "config.yaml").parent.mkdir(parents=True, exist_ok=True)
+    (direct_home / "config.yaml").write_text((baseline.hermes_home / "config.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+    direct = MemoryV2Provider()
+    direct.initialize("session-direct", hermes_home=str(direct_home), platform="eval")
+    direct.sync_turn(
+        events[0].text,
+        "Synthetic eval assistant acknowledgement.",
+        session_id=events[0].session_id,
+        event_id=events[0].id,
+        created_at=events[0].created_at,
+    )
+    direct.handle_tool_call("memory_v2_consolidate", {})
+
+    result = baseline.retrieve(query)
+    direct_packet = direct.prefetch(query.text, session_id="session-direct")
+
+    timestamp = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
+    assert timestamp.sub("<runtime-timestamp>", result.memory_packet) == timestamp.sub(
+        "<runtime-timestamp>", direct_packet
+    )
+    assert "event_pref_direct" in result.retrieved_source_refs
+
+
+def test_memory_v2_baseline_uses_provider_lifecycle_not_eval_store_shortcut(tmp_path):
+    event = EvalEvent(
+        id="event_open_loop_provider",
+        session_id="session-provider",
+        role="user",
+        created_at="2026-02-01T09:00:00Z",
+        text="Remember to follow up on Memory v2 provider lifecycle tomorrow.",
+    )
+    query = EvalQuery(
+        id="q_open_loop_provider",
+        route="project_continuity",
+        text="What open loops are pending for Memory v2 provider lifecycle?",
+        expected_source_refs=["event_open_loop_provider"],
+        expected_answer_contains=["follow up on Memory v2 provider lifecycle tomorrow"],
+    )
+    baseline = MemoryV2Baseline(tmp_path / "memory_v2")
+
+    baseline.ingest([event])
+    baseline.consolidate()
+    result = baseline.retrieve(query)
+
+    assert "working_open_loops" in result.memory_packet
+    assert "event_open_loop_provider" in result.memory_packet
+    assert "follow up on Memory v2 provider lifecycle tomorrow" in result.memory_packet
+
+
+def test_memory_v2_eval_baseline_has_no_eval_only_precision_or_gold_label_access():
+    import inspect
+    import plugins.memory.memory_v2.evals.baselines as baselines
+
+    source = "\n".join(
+        [
+            inspect.getsource(baselines.MemoryV2Baseline.retrieve),
+            inspect.getsource(baselines.MemoryV2Baseline._session_id_for_query),
+        ]
+    )
+
+    assert "hard_eval_precision" not in source
+    assert not hasattr(baselines, "_filter_for_hard_eval_precision")
+    assert "expected_source_refs" not in source
+    assert "expected_answer_contains" not in source
+    assert "forbidden_source_refs" not in source
+
+
+def test_chronological_contract_datasets_cover_30_90_365_days_and_checkpoints():
+    from plugins.memory.memory_v2.evals.datasets import build_chronological_contract_datasets
+
+    datasets = build_chronological_contract_datasets()
+
+    assert {dataset.metadata["contract_window_days"] for dataset in datasets} == {30, 90, 365}
+    for dataset in datasets:
+        timestamps = [event.created_at for event in dataset.events]
+        assert timestamps == sorted(timestamps)
+        assert dataset.metadata["ingestion_order"] == "chronological"
+        assert dataset.metadata["restart_checkpoint_after_event_ids"]
+        assert dataset.metadata["rebuild_index_checkpoint_after_event_ids"]
+        assert dataset.metadata["human_baseline_methodology"]["mode"] == "honest_human_timed_open_book"
+        assert dataset.metadata["human_baseline_methodology"]["uses_fixture_answers"] is False
+        assert dataset.queries

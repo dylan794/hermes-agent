@@ -11,6 +11,21 @@ from plugins.memory.memory_v2.schemas import CandidateMemory, MemoryItem
 
 
 def _provider(tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        """
+memory_v2:
+  archive:
+    enabled: true
+    capture_enabled: true
+  extraction:
+    enabled: true
+    candidate_creation_enabled: true
+  review_apply:
+    enabled: true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
     provider = MemoryV2Provider()
     provider.initialize("session-ops", hermes_home=str(tmp_path), platform="cli")
     return provider
@@ -25,7 +40,20 @@ def test_manual_promote_candidate_routes_through_audited_operation(tmp_path):
     )
     candidate = provider.store.list_candidates()[0]
 
-    result = json.loads(provider.handle_tool_call("memory_v2_promote", {"candidate_id": candidate.id}))
+    plan = json.loads(provider.handle_tool_call("memory_v2_review_plan", {"candidate_ids": [candidate.id]}))
+    action = plan["actions"][0]
+    result = json.loads(
+        provider.handle_tool_call(
+            "memory_v2_promote",
+            {
+                "candidate_id": candidate.id,
+                "plan_id": plan["plan_id"],
+                "action_id": action["action_id"],
+                "candidate_fingerprint": action["candidate_fingerprint"],
+                "confirm": "APPLY_MEMORY_V2_REVIEW_PLAN",
+            },
+        )
+    )
 
     assert result["success"] is True
     assert result["operation_id"].startswith("op_")
@@ -37,12 +65,13 @@ def test_manual_promote_candidate_routes_through_audited_operation(tmp_path):
     assert getattr(provider.store.list_candidates()[0].gate_decision, "value", provider.store.list_candidates()[0].gate_decision) == "promoted"
 
     operations = provider.store.list_operation_records()
-    assert len(operations) == 1
-    assert operations[0]["operation_id"] == result["operation_id"]
-    assert operations[0]["type"] == "promote_candidate_to_memory_item"
-    assert operations[0]["source_refs"] == candidate.source_refs
-    assert candidate.id in operations[0]["before_ids"]
-    assert promoted_id in operations[0]["after_ids"]
+    assert len(operations) == 2
+    assert [record["status"] for record in operations] == ["prepared", "committed"]
+    assert operations[0]["operation_id"] == operations[1]["operation_id"] == result["operation_id"]
+    assert operations[1]["type"] == "promote_candidate_to_memory_item"
+    assert operations[1]["source_refs"] == candidate.source_refs
+    assert candidate.id in operations[1]["before_ids"]
+    assert promoted_id in operations[1]["after_ids"]
 
 
 def test_reject_candidate_operation_updates_rejected_log_and_audit(tmp_path):
@@ -119,7 +148,7 @@ def test_repair_non_dry_run_rebuilds_derived_index_only(tmp_path):
     provider.store.append_candidate(
         CandidateMemory(id="cand_unindexed", type="fact", claim="Needs index rebuild", source_refs=[event["id"]])
     )
-    assert provider.index.count_memories() == 0
+    assert provider.index.count_memories() == 1  # raw event is indexed at append time; candidate is not yet indexed
 
     repair = MemoryHealthChecker(provider.store, provider.index).repair(dry_run=False)
 

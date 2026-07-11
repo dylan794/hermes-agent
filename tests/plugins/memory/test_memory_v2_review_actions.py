@@ -9,6 +9,18 @@ from plugins.memory.memory_v2.schemas import CandidateMemory, MemoryItem
 
 
 def _provider(tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        """
+memory_v2:
+  archive:
+    enabled: true
+    capture_enabled: true
+  review_apply:
+    enabled: true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
     provider = MemoryV2Provider()
     provider.initialize("session-review-actions", hermes_home=str(tmp_path), platform="cli")
     return provider
@@ -155,7 +167,8 @@ def test_review_apply_rejects_promotion_actions_but_allows_safe_rejection_action
     assert payload["failed"][0]["candidate_id"] == "cand_safe"
     assert "automatic promotion is disabled" in payload["failed"][0]["error"]
     operation_types = [record["type"] for record in provider.store.list_operation_records()]
-    assert operation_types == ["reject_candidate"]
+    assert operation_types == ["reject_candidate", "reject_candidate"]
+    assert [record["status"] for record in provider.store.list_operation_records()] == ["prepared", "committed"]
 
 
 def test_review_apply_rejects_stale_plan_when_candidate_changed(tmp_path):
@@ -277,5 +290,5 @@ def test_review_plan_source_check_does_not_call_unbounded_read_raw_events(tmp_pa
     assert plan["success"] is True
     assert plan["actions"][0]["source_check"]["all_refs_exist"] is True
     assert plan["actions"][0]["source_check"]["sources"][0]["id"] == event["id"]
-    assert plan["actions"][0]["source_check"]["sources"][0]["quote"]["present"] is True
-    assert plan["actions"][0]["source_check"]["sources"][0]["quote"]["sha256"]
+    assert plan["actions"][0]["source_check"]["sources"][0]["quote"]["present"] is False
+    assert plan["actions"][0]["source_check"]["sources"][0]["canonical_evidence"] is True

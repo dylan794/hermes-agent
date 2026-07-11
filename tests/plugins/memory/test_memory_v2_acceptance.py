@@ -29,6 +29,19 @@ def benchmark() -> dict[str, Any]:
 
 @pytest.fixture()
 def seeded_provider(tmp_path: Path, benchmark: dict[str, Any]) -> MemoryV2Provider:
+    (tmp_path / "config.yaml").write_text(
+        """memory_v2:
+  archive:
+    enabled: true
+    capture_enabled: true
+  extraction:
+    enabled: true
+    candidate_creation_enabled: true
+  contradictions:
+    create_candidates: true
+""",
+        encoding="utf-8",
+    )
     provider = MemoryV2Provider()
     provider.initialize("acceptance-session", hermes_home=tmp_path, platform="pytest")
 
@@ -132,8 +145,9 @@ def test_memory_v2_acceptance_contradiction_case_creates_review_candidate(
     assert latest["type"] == "environment"
     assert "contradict" in latest["promotion_reason"].lower() or "conflict" in latest["promotion_reason"].lower()
 
-    after = seeded_provider.index.search("Hermes runtime host_environment WSL", route="contradiction_check", limit=5)
-    assert any(result["id"] == "env_host_wsl" and result["status"] == "active" for result in after)
+    # Existing beliefs are not durably superseded by candidate creation; that
+    # requires a separately confirmed review-plan mutation.
+    assert seeded_provider.store.list_operation_records() == []
 
 
 def test_memory_v2_acceptance_profile_isolation_does_not_seed_other_profile_memory(

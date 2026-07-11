@@ -5,27 +5,27 @@ events:
   - id: event_project_goal
     session_id: sess_project
     role: user
-    text: "Project Memory v2 goal: build source-grounded, low-compute long-term memory."
+    text: "Remember that Project Memory v2 goal: build source-grounded, low-compute long-term memory."
     expected_candidate_type: project_state
   - id: event_project_decision
     session_id: sess_project
     role: user
-    text: "Project Memory v2 decision: keep raw events as evidence and promoted memories as current beliefs."
+    text: "Remember that Project Memory v2 decision: keep raw events as evidence and promoted memories as current beliefs."
     expected_candidate_type: project_state
   - id: event_project_next
     session_id: sess_project
     role: user
-    text: "Project Memory v2 next action: implement scientific eval harness."
+    text: "Remember that Project Memory v2 next action: implement scientific eval harness."
     expected_candidate_type: project_state
   - id: event_project_status_old
     session_id: sess_project
     role: user
-    text: "Project Memory v2 status: paused."
+    text: "Remember that Project Memory v2 status: paused."
     expected_candidate_type: project_state
   - id: event_project_status_new
     session_id: sess_project
     role: user
-    text: "Project Memory v2 status: active."
+    text: "Remember that Project Memory v2 status: active."
     expected_candidate_type: project_state
 queries:
   - id: q_project_where_left
