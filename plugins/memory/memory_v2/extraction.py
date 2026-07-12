@@ -124,6 +124,12 @@ class OfflineSessionExtractor:
         r"\b(?:we|i)\s+(?:finished|completed|fixed)\s+(?P<value>.+?)(?:\.|$)",
         re.IGNORECASE | re.DOTALL,
     )
+    _NEGATED_COMPLETION_RE = re.compile(
+        r"\b(?:did\s+not|didn't|never|not)\s+(?:finish|finished|complete|completed|fix|fixed)\b"
+        r"|\b(?:finished|completed|fixed)\s+(?:neither|nothing|none)\b"
+        r"|\b(?:finished|completed|fixed)\b[^.\n]*(?:\bbut\b|\bhowever\b)[^.\n]*\b(?:fail(?:ed|ure)?|broken|incomplete|not\s+done)\b",
+        re.IGNORECASE,
+    )
     _USER_CONTRADICTION_RE = re.compile(
         r"\b(?:the\s+test|testing|the\s+result)\s+(?:showed|proved|confirmed)\s+(?P<value>.+?\s+(?:wrong|false|invalid))(?:\.|$)",
         re.IGNORECASE | re.DOTALL,
@@ -254,8 +260,11 @@ class OfflineSessionExtractor:
         if match := self._USER_BLOCKER_RE.search(clean):
             blocker_span = self._span(event, "user_content", match.group(0), role="user") or span
             rows.append(self._row(MemoryType.PROJECT_STATE, "blocker", f"Blocker: {self._finish_sentence(match.group('value'))}", "working/open_loops.yaml", 0.78, 0.72, 0.78, [blocker_span]))
-        if match := self._USER_COMPLETED_RE.search(clean):
-            completed_span = self._span(event, "user_content", match.group(0), role="user") or span
+        for match in self._USER_COMPLETED_RE.finditer(clean):
+            completion_text = match.group(0)
+            if self._NEGATED_COMPLETION_RE.search(completion_text):
+                continue
+            completed_span = self._span(event, "user_content", completion_text, role="user") or span
             rows.append(self._row(MemoryType.EPISODE, "completed_action", f"Completed action: {self._finish_sentence(match.group('value'))}", "semantic/items", 0.78, 0.58, 0.68, [completed_span]))
         if match := self._USER_CONTRADICTION_RE.search(clean):
             negative_span = self._span(event, "user_content", match.group(0), role="user") or span
@@ -405,6 +414,10 @@ class OfflineSessionExtractor:
         )
 
     def _upsert_candidate(self, store: MemoryV2Store, index: MemoryV2Index, candidate: CandidateMemory) -> str:
+        with store.profile_lock():
+            return self._upsert_candidate_locked(store, index, candidate)
+
+    def _upsert_candidate_locked(self, store: MemoryV2Store, index: MemoryV2Index, candidate: CandidateMemory) -> str:
         if self._matches_existing_active_memory(store, candidate):
             return "duplicate_existing_memory"
         candidates = store.list_candidates()

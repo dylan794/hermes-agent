@@ -366,47 +366,89 @@ class MemoryOperationService:
             return self._error("resolve_open_loop", "loop_id is required")
         if status not in allowed:
             return self._error("resolve_open_loop", f"status must be one of: {sorted(allowed)}")
-        loops = self.store.list_open_loops()
+        operation_id = f"op_{uuid.uuid4().hex}"
+        operation_type = "resolve_open_loop"
+        canonical_write_started = False
+        source_refs: List[str] = []
         updated_loop: Optional[Dict[str, Any]] = None
-        now = utc_now_iso()
-        for loop in loops:
-            if loop.get("id") == loop_id:
-                history = list(loop.get("history") or [])
-                history.append(
-                    {
-                        "updated_at": now,
-                        "from_status": str(loop.get("status") or ""),
-                        "to_status": status,
-                        "resolution": resolution,
-                        "actor": actor,
-                    }
+        reason = resolution or f"status changed to {status}"
+        try:
+            with self.store.profile_lock():
+                interrupted = self._interrupted_operations()
+                if interrupted:
+                    raise ValidationError(
+                        "Memory v2 has interrupted operations requiring recovery before mutation: "
+                        + ", ".join(str(item.get("operation_id") or "unknown") for item in interrupted)
+                    )
+                loops = self.store.list_open_loops()
+                now = utc_now_iso()
+                for loop in loops:
+                    if loop.get("id") == loop_id:
+                        source_refs = [str(ref) for ref in loop.get("source_refs") or []]
+                        history = list(loop.get("history") or [])
+                        history.append(
+                            {
+                                "updated_at": now,
+                                "from_status": str(loop.get("status") or ""),
+                                "to_status": status,
+                                "resolution": resolution,
+                                "actor": actor,
+                            }
+                        )
+                        loop["status"] = status
+                        loop["updated_at"] = now
+                        loop["history"] = history
+                        if resolution:
+                            loop["resolution"] = resolution
+                        if status in {"resolved", "abandoned"}:
+                            loop["resolved_at"] = now
+                        updated_loop = loop
+                        break
+                if updated_loop is None:
+                    raise ValidationError(f"open loop not found: {loop_id}")
+                self._audit(
+                    operation_type,
+                    operation_id=operation_id,
+                    status="prepared",
+                    actor=actor,
+                    reason=reason,
+                    source_refs=source_refs,
+                    before_ids=[loop_id],
+                    after_ids=[loop_id],
+                    metadata={"status": status},
                 )
-                loop["status"] = status
-                loop["updated_at"] = now
-                loop["history"] = history
-                if resolution:
-                    loop["resolution"] = resolution
-                if status in {"resolved", "abandoned"}:
-                    loop["resolved_at"] = now
-                updated_loop = loop
-                break
-        if updated_loop is None:
-            return self._error("resolve_open_loop", f"open loop not found: {loop_id}")
-        self.store.write_open_loops(loops)
-        self.index.index_open_loop(updated_loop, file_path=self.store.open_loops_path)
-        op = self._audit(
-            "resolve_open_loop",
-            actor=actor,
-            reason=resolution or f"status changed to {status}",
-            source_refs=[str(ref) for ref in updated_loop.get("source_refs") or []],
-            before_ids=[loop_id],
-            after_ids=[loop_id],
-            metadata={"status": status},
-        )
+                canonical_write_started = True
+                self.store.write_open_loops(loops)
+                self._maybe_failpoint("after_resolve_open_loop_write")
+                self.index.index_open_loop(updated_loop, file_path=self.store.open_loops_path)
+                self._audit(
+                    operation_type,
+                    operation_id=operation_id,
+                    status="committed",
+                    actor=actor,
+                    reason=reason,
+                    source_refs=source_refs,
+                    before_ids=[loop_id],
+                    after_ids=[loop_id],
+                    metadata={"status": status},
+                )
+        except Exception as exc:
+            self._audit(
+                operation_type,
+                operation_id=operation_id,
+                status="recovery_required" if canonical_write_started else "failed",
+                actor=actor,
+                reason=reason,
+                source_refs=source_refs,
+                before_ids=[loop_id],
+                after_ids=[loop_id],
+                metadata={"status": status, "error": str(exc)},
+            )
+            return self._error(operation_type, str(exc))
         return MemoryOperationResult(
             success=True,
-            operation_id=op["operation_id"],
-            operation_type="resolve_open_loop",
+            operation_id=operation_id,
+            operation_type=operation_type,
             ids=[loop_id],
             payload={"loop": updated_loop},
         )

@@ -743,24 +743,25 @@ class MemoryV2Provider(MemoryProvider):
                         GateDecision.ARCHIVED_ONLY,
                         "Archived automatically: obvious redacted secret candidate; raw evidence retained without pending promotion.",
                     )
-                duplicate = self._find_duplicate_candidate(candidate)
-                if duplicate is None:
-                    self.store.append_candidate(candidate)
-                    self.index.index_candidate(candidate)
-                else:
-                    merged_refs = list(duplicate.source_refs)
-                    for source_ref in candidate.source_refs:
-                        if source_ref not in merged_refs:
-                            merged_refs.append(source_ref)
-                    if merged_refs != list(duplicate.source_refs):
-                        duplicate.source_refs = merged_refs
-                        updated_candidates = [
-                            duplicate if existing.id == duplicate.id else existing
-                            for existing in self.store.list_candidates()
-                        ]
-                        self.store.rewrite_candidates(updated_candidates)
-                        self.index.index_candidate(duplicate)
-                    candidate = duplicate
+                with self.store.profile_lock():
+                    duplicate = self._find_duplicate_candidate(candidate)
+                    if duplicate is None:
+                        self.store.append_candidate(candidate)
+                        self.index.index_candidate(candidate)
+                    else:
+                        merged_refs = list(duplicate.source_refs)
+                        for source_ref in candidate.source_refs:
+                            if source_ref not in merged_refs:
+                                merged_refs.append(source_ref)
+                        if merged_refs != list(duplicate.source_refs):
+                            duplicate.source_refs = merged_refs
+                            updated_candidates = [
+                                duplicate if existing.id == duplicate.id else existing
+                                for existing in self.store.list_candidates()
+                            ]
+                            self.store.rewrite_candidates(updated_candidates)
+                            self.index.index_candidate(duplicate)
+                        candidate = duplicate
         if (
             messages
             and self._config.archive.enabled
@@ -866,9 +867,10 @@ class MemoryV2Provider(MemoryProvider):
                 promotion_reason="pending: source-backed bounded tool-result episode",
                 source_refs=[raw_id],
             )
-            if self._find_duplicate_candidate(candidate) is None:
-                self.store.append_candidate(candidate)
-                self.index.index_candidate(candidate)
+            with self.store.profile_lock():
+                if self._find_duplicate_candidate(candidate) is None:
+                    self.store.append_candidate(candidate)
+                    self.index.index_candidate(candidate)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         schemas = [
@@ -1363,23 +1365,24 @@ class MemoryV2Provider(MemoryProvider):
         auto_superseded_ids = {item["superseded_id"] for item in auto_superseded}
         created_candidate_ids: List[str] = []
         if create_candidates:
-            for conflict in conflicts:
-                if conflict.get("proposed_superseded_id") in auto_superseded_ids:
-                    continue
-                if (
-                    conflict.get("proposed_action")
-                    != "manual_review_supersession_candidate"
-                ):
-                    continue
-                candidate = self._candidate_from_conflict(conflict)
-                if candidate is None:
-                    continue
-                duplicate = self._find_duplicate_candidate(candidate)
-                if duplicate is not None:
-                    continue
-                self.store.append_candidate(candidate)
-                self.index.index_candidate(candidate)
-                created_candidate_ids.append(candidate.id)
+            with self.store.profile_lock():
+                for conflict in conflicts:
+                    if conflict.get("proposed_superseded_id") in auto_superseded_ids:
+                        continue
+                    if (
+                        conflict.get("proposed_action")
+                        != "manual_review_supersession_candidate"
+                    ):
+                        continue
+                    candidate = self._candidate_from_conflict(conflict)
+                    if candidate is None:
+                        continue
+                    duplicate = self._find_duplicate_candidate(candidate)
+                    if duplicate is not None:
+                        continue
+                    self.store.append_candidate(candidate)
+                    self.index.index_candidate(candidate)
+                    created_candidate_ids.append(candidate.id)
         return {
             "success": True,
             "mode": "dashboard_and_candidate_generator",

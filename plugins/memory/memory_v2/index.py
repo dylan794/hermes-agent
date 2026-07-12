@@ -602,6 +602,54 @@ class MemoryV2Index:
             row = conn.execute("SELECT COUNT(*) FROM raw_events_fts").fetchone()
         return int(row[0])
 
+    def raw_event_index_health(self) -> Dict[str, Any]:
+        """Return cheap completeness signals for incremental raw-index updates."""
+        with self._connect() as conn:
+            raw_count = int(conn.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0])
+            fts_count = int(conn.execute("SELECT COUNT(*) FROM raw_events_fts").fetchone()[0])
+            invalid_metadata_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) FROM raw_events
+                    WHERE byte_offset IS NULL OR byte_offset < 0
+                       OR byte_length IS NULL OR byte_length <= 0
+                       OR line_no IS NULL OR line_no <= 0
+                    """
+                ).fetchone()[0]
+            )
+            missing_fts_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) FROM raw_events AS raw
+                    LEFT JOIN raw_events_fts AS fts ON fts.id = raw.id
+                    WHERE fts.id IS NULL
+                    """
+                ).fetchone()[0]
+            )
+            orphan_fts_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) FROM raw_events_fts AS fts
+                    LEFT JOIN raw_events AS raw ON raw.id = fts.id
+                    WHERE raw.id IS NULL
+                    """
+                ).fetchone()[0]
+            )
+            last_row = conn.execute(
+                """
+                SELECT record_sha256 FROM raw_events
+                ORDER BY line_no DESC, chain_index DESC LIMIT 1
+                """
+            ).fetchone()
+        return {
+            "raw_event_count": raw_count,
+            "raw_event_fts_count": fts_count,
+            "invalid_metadata_count": invalid_metadata_count,
+            "missing_fts_count": missing_fts_count,
+            "orphan_fts_count": orphan_fts_count,
+            "last_record_sha256": str(last_row[0] or "") if last_row else "",
+        }
+
     def raw_event_metadata(self, event_id: str) -> Dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -1456,8 +1504,12 @@ class MemoryV2Index:
         return max(1, min(value, 50))
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = sqlite3.connect(str(self.db_path), timeout=5.0)
+        # Canonical mutations already serialize through the cross-process
+        # profile lock. DELETE journaling avoids inheriting fragile WAL shared
+        # state when worker processes are forked after SQLite was initialized.
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     @staticmethod

@@ -180,7 +180,36 @@ def register_local_artifact(
             "raw_ref": raw_ref,
         },
     )
-    store.write_artifact_record(record)
+    with store.profile_lock():
+        existing = store.read_artifact_record(record.id)
+        if existing is not None:
+            privacy_rank = {
+                PrivacyLevel.PUBLIC.value: 0,
+                PrivacyLevel.PERSONAL.value: 1,
+                PrivacyLevel.SENSITIVE.value: 2,
+                PrivacyLevel.SECRET.value: 3,
+            }
+            existing_privacy = getattr(existing.privacy_level, "value", str(existing.privacy_level))
+            incoming_privacy = getattr(record.privacy_level, "value", str(record.privacy_level))
+            source_uris = list(existing.metadata.get("source_uris") or [])
+            for uri in (existing.source_uri, record.source_uri):
+                if uri and uri not in source_uris:
+                    source_uris.append(uri)
+            if existing.metadata.get("tombstoned"):
+                existing.metadata["source_uris"] = source_uris
+                existing.privacy_level = PrivacyLevel.SECRET
+                existing.retention_policy = "tombstoned"
+                existing.metadata["retrieval_disabled"] = True
+                store.write_artifact_record(existing)
+                return existing
+            record.metadata["source_uris"] = source_uris
+            record.metadata["raw_ref"] = str(existing.metadata.get("raw_ref") or raw_ref)
+            if privacy_rank.get(existing_privacy, 1) > privacy_rank.get(incoming_privacy, 1):
+                record.privacy_level = PrivacyLevel.coerce(existing_privacy, "privacy_level")
+            store.write_artifact_record(record)
+            return record
+        record.metadata["source_uris"] = [record.source_uri]
+        store.write_artifact_record(record)
     return record
 
 

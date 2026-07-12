@@ -579,11 +579,26 @@ class MemoryV2Store:
         return manifest
 
     def _update_raw_archive_manifest_after_append(self, event: Dict[str, Any]) -> Dict[str, Any]:
-        previous = {}
+        previous: Dict[str, Any] = {}
+        manifest_valid = False
         if self.raw_archive_manifest_path.exists():
-            with self.raw_archive_manifest_path.open("r", encoding="utf-8") as fh:
-                loaded = yaml.safe_load(fh) or {}
-            previous = loaded if isinstance(loaded, dict) else {}
+            try:
+                with self.raw_archive_manifest_path.open("r", encoding="utf-8") as fh:
+                    loaded = yaml.safe_load(fh) or {}
+                previous = loaded if isinstance(loaded, dict) else {}
+                prior_count = int(previous.get("event_count") or 0)
+                manifest_valid = (
+                    prior_count == max(0, int(event.get("chain_index") or 0))
+                    and str(previous.get("last_record_sha256") or "")
+                    == str(event.get("previous_record_sha256") or "")
+                )
+            except (OSError, TypeError, ValueError, yaml.YAMLError):
+                previous = {}
+                manifest_valid = False
+        if not manifest_valid:
+            # Exceptional repair path: canonical JSONL is authoritative. A
+            # missing/corrupt/stale manifest must not reset counts to one.
+            return self.rebuild_raw_archive_manifest()
         event_count = int(previous.get("event_count") or 0) + 1
         first_created_at = str(previous.get("first_created_at") or event.get("created_at") or "")
         manifest = {
@@ -645,7 +660,38 @@ class MemoryV2Store:
         try:
             from .index import MemoryV2Index
 
-            MemoryV2Index(db_path).rebuild_from_store(self)
+            index = MemoryV2Index(db_path)
+            indexed = index.index_raw_archive_event(
+                event,
+                byte_offset=byte_offset,
+                byte_length=byte_length,
+                line_no=int(event.get("chain_index") or 0) + 1,
+            )
+            if not indexed:
+                raise ValidationError("incremental raw-event metadata indexing rejected the appended event")
+            index.index_raw_event(event, index_archive=False)
+            manifest = self.read_raw_archive_manifest()
+            manifest_event_count = int(manifest.get("event_count") or 0)
+            health = index.raw_event_index_health()
+            indexed_event_count = int(health["raw_event_count"])
+            if (
+                indexed_event_count != manifest_event_count
+                or int(health["raw_event_fts_count"]) != manifest_event_count
+                or int(health["invalid_metadata_count"]) != 0
+                or int(health["missing_fts_count"]) != 0
+                or int(health["orphan_fts_count"]) != 0
+                or str(health["last_record_sha256"] or "")
+                != str(manifest.get("last_record_sha256") or "")
+            ):
+                raise ValidationError(
+                    "incremental raw index is incomplete; explicit rebuild required"
+                )
+            self.update_raw_archive_index_status(
+                derived_index_status="ok",
+                indexed_event_count=indexed_event_count,
+                last_indexed_record_sha256=str(event.get("record_sha256") or ""),
+                raw_index_schema_version=1,
+            )
             return
         except Exception as exc:
             last_error = exc
