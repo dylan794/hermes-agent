@@ -174,11 +174,14 @@ def test_extract_candidates_tool_bounds_recent_raw_limit_and_rejects_invalid_arg
 
     invalid_type = _tool(provider, "memory_v2_extract_candidates", {"recent_raw_limit": "10"})
     invalid_session = _tool(provider, "memory_v2_extract_candidates", {"session_id": 123})
+    cross_session = _tool(provider, "memory_v2_extract_candidates", {"session_id": "other-session"})
     too_large = _tool(provider, "memory_v2_extract_candidates", {"recent_raw_limit": 201})
 
     assert invalid_type["success"] is False
     assert "recent_raw_limit must be an integer" in invalid_type["error"]
     assert invalid_session["success"] is False
     assert "session_id must be a string" in invalid_session["error"]
+    assert cross_session["success"] is False
+    assert cross_session["blockers"] == ["provider_session_mismatch"]
     assert too_large["success"] is False
     assert "recent_raw_limit must be between 1 and 200" in too_large["error"]

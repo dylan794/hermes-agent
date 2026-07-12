@@ -54,7 +54,8 @@ def test_explicit_offline_extraction_creates_normal_session_candidates_without_p
     assert any("prefers short Discord replies" in candidate.claim for candidate in candidates)
     assert any("pending candidates" in candidate.claim for candidate in candidates)
     assert any("add source-grounded extraction tests" in candidate.claim for candidate in candidates)
-    assert all("offline_extraction:v1" in candidate.promotion_reason for candidate in candidates)
+    assert all("offline_extraction:v2" in candidate.promotion_reason for candidate in candidates)
+    assert all(candidate.evidence_spans for candidate in candidates)
 
 
 def test_session_end_archives_without_creating_candidates_by_default(tmp_path):

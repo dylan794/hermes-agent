@@ -85,6 +85,26 @@ class GateDecision(_StrEnum):
     SUPERSEDED = "superseded"
 
 
+class CandidateClaimKind(_StrEnum):
+    OTHER = "other"
+    PREFERENCE = "preference"
+    ENVIRONMENT_STATE = "environment_state"
+    DECISION = "decision"
+    NEXT_ACTION = "next_action"
+    OPEN_QUESTION = "open_question"
+    CURRENT_STATE = "current_state"
+    GOAL = "goal"
+    STATUS = "status"
+    CONSTRAINT = "constraint"
+    SKILL_CANDIDATE = "skill_candidate"
+    OPEN_LOOP = "open_loop"
+    CONTRADICTION = "contradiction"
+    BLOCKER = "blocker"
+    COMPLETED_ACTION = "completed_action"
+    AUTHORITATIVE_ARTIFACT = "authoritative_artifact"
+    ACCEPTED_PROPOSAL = "accepted_proposal"
+
+
 class ArtifactModality(_StrEnum):
     TEXT = "text"
     IMAGE = "image"
@@ -546,6 +566,12 @@ class CandidateMemory:
     confidence: float = 0.7
     promotion_reason: str = ""
     source_refs: List[str] = field(default_factory=list)
+    claim_kind: CandidateClaimKind | str = CandidateClaimKind.OTHER
+    durability: float = 0.5
+    evidence_spans: List[Dict[str, Any]] = field(default_factory=list)
+    negative_evidence: List[Dict[str, Any]] = field(default_factory=list)
+    extraction_method: str = "legacy"
+    extractor_version: str = ""
     gate_decision: GateDecision | str = GateDecision.PENDING
     decision_reason: str = ""
 
@@ -556,6 +582,11 @@ class CandidateMemory:
         self.importance = _validate_unit_interval(self.importance, "importance")
         self.confidence = _validate_unit_interval(self.confidence, "confidence")
         self.source_refs = _list_of_strings(self.source_refs)
+        self.claim_kind = CandidateClaimKind.coerce(self.claim_kind, "claim_kind")
+        self.durability = _validate_unit_interval(self.durability, "durability")
+        self.evidence_spans = self._validate_evidence_spans(self.evidence_spans, "evidence_spans")
+        self.negative_evidence = self._validate_evidence_spans(self.negative_evidence, "negative_evidence")
+        self.extraction_method = _require_nonblank(self.extraction_method, "extraction_method").strip().lower()
         self.gate_decision = GateDecision.coerce(self.gate_decision, "gate_decision")
         if (
             self.gate_decision != GateDecision.PENDING
@@ -576,9 +607,44 @@ class CandidateMemory:
             "confidence": self.confidence,
             "promotion_reason": self.promotion_reason,
             "source_refs": list(self.source_refs),
+            "claim_kind": cast(CandidateClaimKind, self.claim_kind).value,
+            "durability": self.durability,
+            "evidence_spans": [dict(span) for span in self.evidence_spans],
+            "negative_evidence": [dict(span) for span in self.negative_evidence],
+            "extraction_method": self.extraction_method,
+            "extractor_version": self.extractor_version,
             "gate_decision": cast(GateDecision, self.gate_decision).value,
             "decision_reason": self.decision_reason,
         }
+
+    @staticmethod
+    def _validate_evidence_spans(value: Any, field_name: str) -> List[Dict[str, Any]]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValidationError(f"{field_name} must be a list")
+        validated: List[Dict[str, Any]] = []
+        for raw in value:
+            if not isinstance(raw, dict):
+                raise ValidationError(f"{field_name} entries must be objects")
+            span = dict(raw)
+            for key in ("source_id", "field", "role", "text"):
+                span[key] = _require_nonblank(span.get(key), f"{field_name}.{key}")
+            if span["role"] not in {"user", "assistant", "tool"}:
+                raise ValidationError(f"{field_name}.role must be user, assistant, or tool")
+            if span["field"] not in {"user_content", "assistant_content", "result", "content", "stdout", "stderr"}:
+                raise ValidationError(f"{field_name}.field is not evidence-bearing")
+            try:
+                span["start"] = int(span.get("start"))
+                span["end"] = int(span.get("end"))
+            except (TypeError, ValueError) as exc:
+                raise ValidationError(f"{field_name} offsets must be integers") from exc
+            if span["start"] < 0 or span["end"] <= span["start"]:
+                raise ValidationError(f"{field_name} offsets are invalid")
+            if span["end"] - span["start"] != len(span["text"]):
+                raise ValidationError(f"{field_name} offsets must match text length")
+            validated.append(span)
+        return validated
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "CandidateMemory":

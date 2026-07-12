@@ -81,6 +81,7 @@ These are the desired Phase 10 defaults for a safe initial rollout. Keep mutatin
 | `memory_v2.archive.include_tool_outputs` | `false` | Exclude tool output from import until separate privacy/poisoning review. |
 | `memory_v2.extraction.enabled` | `false` | Keep offline candidate extraction disabled until Step 6 is explicitly gated. |
 | `memory_v2.extraction.candidate_creation_enabled` | `false` | Candidate creation from archive evidence must be an explicit opt-in and pending-only. |
+| `memory_v2.extraction.small_model_enabled` | `false` | Optional structured model extraction requires this flag plus an explicitly supplied adapter; validated output remains pending-only. |
 | `memory_v2.consolidation.enabled` | `false` | Disable automatic consolidation/promotion for initial rollout. |
 | `memory_v2.prefetch.enabled` | `false` | Disable automatic online memory injection until late-stage gated rollout. |
 | `memory_v2.auto_promote.enabled` | `false` | Never automatically promote semantic memory in the initial release. |
@@ -98,6 +99,7 @@ memory_v2:
   extraction:
     enabled: false
     candidate_creation_enabled: false
+    small_model_enabled: false
   consolidation:
     enabled: false
   prefetch:

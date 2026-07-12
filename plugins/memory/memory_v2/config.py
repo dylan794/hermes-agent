@@ -35,6 +35,7 @@ class ArchiveFlags:
 class ExtractionFlags:
     enabled: bool = False
     candidate_creation_enabled: bool = False
+    small_model_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,11 @@ def load_memory_v2_config(hermes_home: str | Path | None) -> MemoryV2FeatureFlag
                 extraction,
                 "candidate_creation_enabled",
                 candidate_default,
+            ),
+            small_model_enabled=_bool(
+                extraction,
+                "small_model_enabled",
+                defaults.extraction.small_model_enabled,
             ),
         ),
         consolidation=ConsolidationFlags(

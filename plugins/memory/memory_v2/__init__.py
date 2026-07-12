@@ -474,6 +474,7 @@ class MemoryV2Provider(MemoryProvider):
         self._store: MemoryV2Store | None = None
         self._index: MemoryV2Index | None = None
         self._config = MemoryV2FeatureFlags()
+        self._extraction_model_adapter: Any = None
         self._initialized = False
 
     @property
@@ -522,6 +523,8 @@ class MemoryV2Provider(MemoryProvider):
         self._agent_context = str(kwargs.get("agent_context") or "primary")
         self._hermes_home = Path(hermes_home).expanduser().resolve()
         self._config = load_memory_v2_config(self._hermes_home)
+        adapter = kwargs.get("extraction_model_adapter")
+        self._extraction_model_adapter = adapter if callable(adapter) else None
         self._base_dir = self._hermes_home / "memory_v2"
         self._store = MemoryV2Store(self._base_dir)
         self._index = MemoryV2Index(self._base_dir / "indexes" / "memory.sqlite")
@@ -1963,6 +1966,18 @@ class MemoryV2Provider(MemoryProvider):
                 "error": "session_id must be a string",
                 "blockers": ["session_id must be a string"],
             }
+        requested_session_id = session_id_arg.strip()
+        effective_session_id = str(self._session_id or "").strip()
+        if requested_session_id and requested_session_id != effective_session_id:
+            return {
+                "success": False,
+                "ready": False,
+                "rollout_step": 6,
+                "mode": "archive_candidate_extraction",
+                "mutations_allowed": "none",
+                "error": "session_id is outside the active provider session authority",
+                "blockers": ["provider_session_mismatch"],
+            }
         try:
             recent_raw_limit = self._strict_int_arg(
                 args, "recent_raw_limit", default=50, minimum=1, maximum=200
@@ -1979,11 +1994,15 @@ class MemoryV2Provider(MemoryProvider):
             }
 
         before = self._safe_record_counts()
-        report = OfflineSessionExtractor().extract(
+        report = OfflineSessionExtractor(model_adapter=self._extraction_model_adapter).extract(
             self.store,
             self.index,
-            session_id=session_id_arg.strip(),
+            session_id=effective_session_id,
             recent_raw_limit=recent_raw_limit,
+            use_model=bool(
+                self._config.extraction.small_model_enabled
+                and self._extraction_model_adapter is not None
+            ),
         )
         after = self._safe_record_counts()
         affected_ids = list(dict.fromkeys(report.created_ids + report.merged_ids))

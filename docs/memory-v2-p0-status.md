@@ -31,6 +31,7 @@ memory_v2:
   extraction:
     enabled: false
     candidate_creation_enabled: false
+    small_model_enabled: false
   consolidation:
     enabled: false
   prefetch:

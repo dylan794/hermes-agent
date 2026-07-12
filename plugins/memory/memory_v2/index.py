@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, cast
 
 from .redaction import redact_data, redact_text, redacted_query_for_log, redacted_query_hash_input
 from .schemas import (
+    CandidateClaimKind,
     CandidateMemory,
     GateDecision,
     MemoryItem,
@@ -455,6 +456,7 @@ class MemoryV2Index:
 
     def index_candidate(self, candidate: CandidateMemory) -> None:
         candidate_type = cast(MemoryType, candidate.type).value
+        claim_kind = cast(CandidateClaimKind, candidate.claim_kind).value
         gate_decision = cast(GateDecision, candidate.gate_decision).value
         body_parts = [
             candidate.claim,
@@ -475,7 +477,13 @@ class MemoryV2Index:
             importance=candidate.importance,
             created_at=candidate.created_at,
             source_refs=candidate.source_refs,
-            tags=["candidate", candidate_type, gate_decision],
+            tags=[
+                "candidate",
+                candidate_type,
+                gate_decision,
+                claim_kind,
+                candidate.extraction_method,
+            ],
             file_path="inbox/candidates.jsonl",
         )
 

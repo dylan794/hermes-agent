@@ -181,6 +181,8 @@ RELEASE_ARTIFACT_PATHS = tuple(
         "docs/memory-v2-archive-release-checklist.md",
         "docs/memory-v2-evals.md",
         "docs/memory-v2-privacy.md",
+        "docs/memory-v2-p0-status.md",
+        "docs/memory-v2-p1-extraction.md",
         "plugins/memory/memory_v2/README.md",
         "tests/plugins/memory/test_memory_v2_release_docs.py",
     )
