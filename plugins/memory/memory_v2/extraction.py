@@ -547,11 +547,13 @@ class OfflineSessionExtractor:
                 memory_type = MemoryType.coerce(raw.get("memory_type"), "memory_type")
                 claim_kind_enum = CandidateClaimKind.coerce(raw.get("claim_kind"), "claim_kind")
                 claim_kind = claim_kind_enum.value
-                if not self._model_evidence_supports(claim_kind, spans, negative):
-                    raise ValidationError("model evidence does not support the typed claim")
                 claim = redact_text(str(raw.get("claim") or "").strip())
                 if not claim_kind or not claim or contains_sensitive_text(claim):
                     raise ValidationError("model claim is invalid")
+                if not self._model_evidence_supports(claim_kind, spans, negative, events=events):
+                    raise ValidationError("model evidence does not support the typed claim")
+                if not self._model_claim_entailed(claim, claim_kind, spans):
+                    raise ValidationError("model claim is not entailed by its exact evidence")
                 confidence = float(raw.get("confidence"))
                 durability = float(raw.get("durability"))
                 if not 0.0 <= confidence <= 1.0 or not 0.0 <= durability <= 1.0:
@@ -580,10 +582,11 @@ class OfflineSessionExtractor:
         claim_kind: str,
         spans: List[EvidenceSpan],
         negative: List[EvidenceSpan],
+        *,
+        events: Dict[str, Dict[str, Any]],
     ) -> bool:
         user_texts = [span["text"] for span in spans if span["role"] == "user"]
         tool_texts = [span["text"] for span in spans if span["role"] == "tool"]
-        assistant_texts = [span["text"] for span in spans if span["role"] == "assistant"]
         if claim_kind == CandidateClaimKind.PREFERENCE.value:
             return any(any(pattern.match(text) for pattern in self._PREFERENCE_PATTERNS) for text in user_texts)
         if claim_kind == CandidateClaimKind.ENVIRONMENT_STATE.value:
@@ -622,10 +625,84 @@ class OfflineSessionExtractor:
                 for text in negative_texts
             )
         if claim_kind == CandidateClaimKind.ACCEPTED_PROPOSAL.value:
-            return bool(assistant_texts) and any(self._PROPOSAL_RE.search(text) for text in assistant_texts) and any(
-                self._ACCEPTANCE_RE.search(text) and not self._REJECTION_RE.search(text) for text in user_texts
-            )
+            proposal_spans = [
+                span for span in spans
+                if span["role"] == "assistant" and self._PROPOSAL_RE.search(span["text"])
+            ]
+            acceptance_spans = [
+                span for span in spans
+                if span["role"] == "user"
+                and self._ACCEPTANCE_RE.search(span["text"])
+                and not self._REJECTION_RE.search(span["text"])
+            ]
+            order = {event_id: position for position, event_id in enumerate(events)}
+            for proposal in proposal_spans:
+                proposal_event = events.get(proposal["source_id"], {})
+                proposal_position = order.get(proposal["source_id"])
+                if proposal_position is None:
+                    continue
+                for acceptance in acceptance_spans:
+                    acceptance_event = events.get(acceptance["source_id"], {})
+                    if order.get(acceptance["source_id"]) != proposal_position + 1:
+                        continue
+                    proposal_session = str(proposal_event.get("provider_session_id") or proposal_event.get("session_id") or "")
+                    acceptance_session = str(acceptance_event.get("provider_session_id") or acceptance_event.get("session_id") or "")
+                    if proposal_session and proposal_session == acceptance_session:
+                        return True
+            return False
         return False
+
+    @classmethod
+    def _model_claim_entailed(
+        cls,
+        claim: str,
+        claim_kind: str,
+        spans: List[EvidenceSpan],
+    ) -> bool:
+        """Conservatively require model claims to retain evidence content.
+
+        Exact spans prove provenance, not meaning.  This lexical entailment gate
+        intentionally rejects unsupported paraphrases rather than allowing a
+        model to invert a preference, constraint, or decision.
+        """
+        aliases: Dict[str, str] = {
+            "likes": "prefer", "like": "prefer", "prefers": "prefer", "preferred": "prefer",
+            "concise": "short", "brief": "short", "verbose": "long",
+            "answers": "answer", "responses": "answer", "response": "answer",
+            "decided": "decide", "decision": "decide", "chooses": "choose", "chosen": "choose",
+        }
+        stop = {
+            "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have",
+            "i", "in", "is", "it", "me", "my", "of", "on", "or", "that", "the", "this", "to",
+            "user", "we", "with", "will", "would", "claim", "accepted", "proposal",
+        }
+
+        def tokens(text: str) -> set[str]:
+            values = re.findall(r"[a-z0-9]+", text.lower())
+            return {aliases.get(value, value) for value in values if value not in stop and len(value) > 1}
+
+        claim_tokens = tokens(claim)
+        evidence_text = " ".join(span["text"] for span in spans)
+        evidence_tokens = tokens(evidence_text)
+        negation_re = re.compile(
+            r"\b(?:not|no|never|without|cannot|can't|don't|doesn't|didn't|won't|wouldn't|shouldn't|isn't|aren't)\b"
+            r"|\b(?:do|does|did|will|would|should|is|are)\s+not\b",
+            re.IGNORECASE,
+        )
+        if bool(negation_re.search(claim)) != bool(negation_re.search(evidence_text)):
+            return False
+        if not claim_tokens:
+            return False
+        shared = claim_tokens & evidence_tokens
+        required = 1 if len(claim_tokens) <= 2 else max(2, (len(claim_tokens) + 1) // 2)
+        if len(shared) < required:
+            return False
+        # Opposite polarity/value markers must never be introduced by the model.
+        opposites = ({"short", "long"}, {"enable", "disable"}, {"allow", "deny"}, {"keep", "delete"})
+        for pair in opposites:
+            if claim_tokens & pair and evidence_tokens & pair and (claim_tokens & pair) != (evidence_tokens & pair):
+                return False
+        return True
 
     def _validate_exact_spans(self, raw_spans: Any, events: Dict[str, Dict[str, Any]]) -> List[EvidenceSpan]:
         if not isinstance(raw_spans, list) or len(raw_spans) > 12:

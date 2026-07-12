@@ -450,3 +450,56 @@ def test_p1_provider_model_path_requires_explicit_flag_and_adapter(tmp_path):
     assert payload["success"] is True
     assert payload["extraction"]["model_created"] == 1
     assert _candidate_by_kind(provider, "constraint").extraction_method == "structured_model"
+
+
+def test_p1_structured_model_rejects_claim_that_contradicts_exact_evidence(tmp_path):
+    provider = _provider(tmp_path)
+    text = "I prefer concise direct answers."
+    _append(provider, {"id": "evt_truth", "type": "turn", "session_id": "p1-extract", "user_content": text})
+
+    def adapter(_payload):
+        return {"version": 1, "candidates": [{
+            "claim_kind": "preference", "memory_type": "preference",
+            "claim": "User prefers verbose ceremonial answers.", "confidence": 0.8, "durability": 0.9,
+            "evidence_spans": [{"source_id": "evt_truth", "field": "user_content", "role": "user", "start": 0, "end": len(text), "text": text}],
+            "negative_evidence": [],
+        }]}
+
+    report = OfflineSessionExtractor(model_adapter=adapter).extract(provider.store, provider.index, session_id="p1-extract", use_model=True)
+    assert report.model_rejected == 1
+    assert not any(candidate.extraction_method == "structured_model" for candidate in provider.store.list_candidates())
+
+
+def test_p1_model_entailment_rejects_introduced_or_dropped_negation():
+    positive = [{"source_id": "evt", "field": "user_content", "role": "user", "start": 0, "end": 32, "text": "I prefer concise direct answers."}]
+    negative_text = "I do not prefer concise direct answers."
+    negative = [{"source_id": "evt", "field": "user_content", "role": "user", "start": 0, "end": len(negative_text), "text": negative_text}]
+
+    assert OfflineSessionExtractor._model_claim_entailed(
+        "User does not prefer concise direct answers.", "preference", positive
+    ) is False
+    assert OfflineSessionExtractor._model_claim_entailed(
+        "User prefers concise direct answers.", "preference", negative
+    ) is False
+
+
+def test_p1_structured_model_requires_proposal_then_adjacent_user_acceptance(tmp_path):
+    provider = _provider(tmp_path)
+    acceptance = "Yes, sounds good."
+    proposal = "I propose we delete the canonical archive."
+    _append(provider, {"id": "evt_early_yes", "type": "turn", "session_id": "p1-extract", "user_content": acceptance})
+    _append(provider, {"id": "evt_late_proposal", "type": "turn", "session_id": "p1-extract", "assistant_content": proposal, "user_content": "Any ideas?"})
+
+    def adapter(_payload):
+        return {"version": 1, "candidates": [{
+            "claim_kind": "accepted_proposal", "memory_type": "decision",
+            "claim": "Accepted proposal: delete the canonical archive.", "confidence": 0.8, "durability": 0.9,
+            "evidence_spans": [
+                {"source_id": "evt_late_proposal", "field": "assistant_content", "role": "assistant", "start": 0, "end": len(proposal), "text": proposal},
+                {"source_id": "evt_early_yes", "field": "user_content", "role": "user", "start": 0, "end": len(acceptance), "text": acceptance},
+            ], "negative_evidence": [],
+        }]}
+
+    report = OfflineSessionExtractor(model_adapter=adapter).extract(provider.store, provider.index, session_id="p1-extract", use_model=True)
+    assert report.model_rejected == 1
+    assert not any(candidate.claim_kind == "accepted_proposal" for candidate in provider.store.list_candidates())

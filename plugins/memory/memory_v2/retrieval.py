@@ -613,10 +613,15 @@ class MemoryPacketComposer:
     """Compose bounded, source-grounded MemoryPacket objects from indexed records."""
 
     def __init__(
-        self, index: MemoryV2Index, *, router: MemoryQueryRouter | None = None
+        self,
+        index: MemoryV2Index,
+        *,
+        router: MemoryQueryRouter | None = None,
+        include_raw_events: bool = False,
     ) -> None:
         self.index = index
         self.router = router or MemoryQueryRouter()
+        self.include_raw_events = bool(include_raw_events)
 
     def compose(self, query: str, *, session_id: str = "") -> MemoryPacket:
         decision = self.router.route(query)
@@ -629,8 +634,16 @@ class MemoryPacketComposer:
                 warnings=[],
             )
 
+        include_raw_events = (
+            self.include_raw_events
+            and bool(str(session_id or "").strip())
+            and "raw_event" in decision.target_types
+        )
         results = self.index.search(
-            decision.search_query, route=decision.route, limit=decision.search_limit
+            decision.search_query,
+            route=decision.route,
+            limit=decision.search_limit,
+            include_raw_events=include_raw_events,
         )
         results = self._filter_raw_events_for_session(results, session_id=session_id)
         results = self._supplement_with_active_projects(results, decision)

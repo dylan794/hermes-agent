@@ -14,11 +14,12 @@ from pathlib import Path
 import pytest
 
 from plugins.memory.memory_v2 import MemoryV2Provider
+from plugins.memory.memory_v2.consolidation import RuleBasedConsolidator
 from plugins.memory.memory_v2.health import MemoryHealthChecker
 from plugins.memory.memory_v2.index import MemoryV2Index
 from plugins.memory.memory_v2.operations import MemoryOperationService
 from plugins.memory.memory_v2.review_actions import CONFIRM_REVIEW_APPLY
-from plugins.memory.memory_v2.schemas import CandidateMemory, ValidationError
+from plugins.memory.memory_v2.schemas import CandidateMemory, MemoryItem, ValidationError
 from plugins.memory.memory_v2.store import MemoryV2Store
 
 
@@ -346,3 +347,78 @@ def test_promote_post_write_failpoint_requires_manual_recovery_and_keeps_partial
     repair = MemoryHealthChecker(provider.store, provider.index).repair(dry_run=False)
     assert any(action["action"] == "manual_operation_recovery_required" and action["safe"] is False for action in repair["actions"])
     assert provider.store.list_operation_records()[-1]["status"] == "recovery_required"
+
+
+def test_consolidator_holds_lock_and_fails_closed_on_interrupted_operation(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    provider.store.append_candidate(CandidateMemory(id="cand_lock_consolidate", type="procedure_ref", claim="A procedure", proposed_destination="skills"))
+    state = {"held": False}
+    original_lock = provider.store.profile_lock
+    original_list = provider.store.list_candidates
+
+    @contextmanager
+    def tracked_lock(*args, **kwargs):
+        with original_lock(*args, **kwargs):
+            state["held"] = True
+            try:
+                yield
+            finally:
+                state["held"] = False
+
+    def checked_candidates():
+        assert state["held"] is True
+        return original_list()
+
+    monkeypatch.setattr(provider.store, "profile_lock", tracked_lock)
+    monkeypatch.setattr(provider.store, "list_candidates", checked_candidates)
+    report = RuleBasedConsolidator().consolidate(provider.store, provider.index)
+    assert report.rejected == 1
+    outer = [row for row in provider.store.list_operation_records() if row["type"] == "rule_based_consolidation"]
+    assert [row["status"] for row in outer] == ["prepared", "committed"]
+
+    provider.store.append_candidate(CandidateMemory(id="cand_blocked_consolidate", type="procedure_ref", claim="Another procedure", proposed_destination="skills"))
+    provider.store.append_operation_record({"operation_id": "op_unrecovered", "type": "test", "status": "recovery_required"})
+    with pytest.raises(ValidationError, match="interrupted operation"):
+        RuleBasedConsolidator().consolidate(provider.store, provider.index)
+    blocked = next(candidate for candidate in original_list() if candidate.id == "cand_blocked_consolidate")
+    assert getattr(blocked.gate_decision, "value", blocked.gate_decision) == "pending"
+
+
+def test_supersede_memory_is_locked_recovery_gated_and_journaled(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    provider.store.write_memory_item(MemoryItem(id="mem_old", type="fact", subject="x", predicate="is", value="old"))
+    provider.store.write_memory_item(MemoryItem(id="mem_new", type="fact", subject="x", predicate="is", value="new"))
+    state = {"held": False}
+    original_lock = provider.store.profile_lock
+    original_read = provider.store.read_memory_item
+
+    @contextmanager
+    def tracked_lock(*args, **kwargs):
+        with original_lock(*args, **kwargs):
+            state["held"] = True
+            try:
+                yield
+            finally:
+                state["held"] = False
+
+    def checked_read(item_id):
+        assert state["held"] is True
+        return original_read(item_id)
+
+    monkeypatch.setattr(provider.store, "profile_lock", tracked_lock)
+    monkeypatch.setattr(provider.store, "read_memory_item", checked_read)
+    result = MemoryOperationService(provider.store, provider.index).supersede_memory("mem_old", "mem_new", reason="new evidence")
+    assert result.success is True
+    records = provider.store.list_operation_records()
+    assert [row["status"] for row in records] == ["prepared", "committed"]
+    assert records[0]["operation_id"] == records[1]["operation_id"] == result.operation_id
+
+
+def test_supersede_memory_post_write_failure_requires_recovery(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    provider.store.write_memory_item(MemoryItem(id="mem_old", type="fact", subject="x", predicate="is", value="old"))
+    provider.store.write_memory_item(MemoryItem(id="mem_new", type="fact", subject="x", predicate="is", value="new"))
+    monkeypatch.setenv("MEMORY_V2_FAILPOINT", "after_supersede_memory_write")
+    result = MemoryOperationService(provider.store, provider.index).supersede_memory("mem_old", "mem_new", reason="new evidence")
+    assert result.success is False
+    assert [row["status"] for row in provider.store.list_operation_records()] == ["prepared", "recovery_required"]

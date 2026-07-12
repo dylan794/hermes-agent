@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import uuid
 from dataclasses import dataclass, field
 from typing import List, cast
 
@@ -83,6 +84,59 @@ class RuleBasedConsolidator:
     """
 
     def consolidate(self, store: MemoryV2Store, index: MemoryV2Index) -> ConsolidationReport:
+        """Run consolidation under the profile lock and recovery journal."""
+        # Local import avoids the module cycle: operations imports this class's
+        # deterministic conversion helpers for manual promotion.
+        from .operations import MemoryOperationService
+
+        operation_id = f"op_{uuid.uuid4().hex}"
+        operation_type = "rule_based_consolidation"
+        with store.profile_lock():
+            interrupted = MemoryOperationService(store, index)._interrupted_operations()
+            if interrupted:
+                raise ValidationError(
+                    "interrupted operation blocks canonical mutation: "
+                    f"{interrupted[0]['operation_id']}"
+                )
+            store.append_operation_record(
+                {
+                    "operation_id": operation_id,
+                    "type": operation_type,
+                    "status": "prepared",
+                    "actor": "rule_based_consolidator",
+                    "before_ids": [],
+                    "after_ids": [],
+                }
+            )
+            try:
+                report = self._consolidate_locked(store, index)
+            except Exception as exc:
+                store.append_operation_record(
+                    {
+                        "operation_id": operation_id,
+                        "type": operation_type,
+                        "status": "recovery_required",
+                        "actor": "rule_based_consolidator",
+                        "reason": str(exc),
+                        "before_ids": [],
+                        "after_ids": [],
+                        "metadata": {"error": str(exc)},
+                    }
+                )
+                raise
+            store.append_operation_record(
+                {
+                    "operation_id": operation_id,
+                    "type": operation_type,
+                    "status": "committed",
+                    "actor": "rule_based_consolidator",
+                    "before_ids": [],
+                    "after_ids": report.promoted_ids + report.rejected_ids + report.archived_ids,
+                }
+            )
+            return report
+
+    def _consolidate_locked(self, store: MemoryV2Store, index: MemoryV2Index) -> ConsolidationReport:
         candidates = store.list_candidates()
         report = ConsolidationReport()
         updated_candidates: List[CandidateMemory] = []

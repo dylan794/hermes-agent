@@ -111,6 +111,42 @@ def test_memory_query_router_extracts_temporal_window_and_entities_for_exact_rec
     assert decision.needs_source_verification is True
 
 
+def test_packet_composer_exact_route_includes_only_active_session_raw_events(tmp_path):
+    _store, index = _store_and_index(tmp_path)
+    index.index_record(
+        id="evt_exact_active",
+        type="raw_event",
+        title="Exact launch phrase",
+        body="provider_session_id=session-active The exact launch phrase was cobalt nebula.",
+        summary="session-active cobalt nebula",
+        status="archived",
+        source_refs=["evt_exact_active"],
+        tags=["session-active"],
+    )
+    index.index_record(
+        id="evt_exact_other",
+        type="raw_event",
+        title="Other exact launch phrase",
+        body="provider_session_id=session-other The exact launch phrase was cobalt nebula.",
+        summary="session-other cobalt nebula",
+        status="archived",
+        source_refs=["evt_exact_other"],
+        tags=["session-other"],
+    )
+
+    composer = MemoryPacketComposer(index, include_raw_events=True)
+    packet = composer.compose(
+        "What did I say about the exact launch phrase cobalt nebula?",
+        session_id="session-active",
+    )
+    assert [item["id"] for item in packet.items] == ["evt_exact_active"]
+
+    no_authority = MemoryPacketComposer(index).compose(
+        "What did I say about the exact launch phrase cobalt nebula?"
+    )
+    assert not any(item["type"] == "raw_event" for item in no_authority.items)
+
+
 def test_memory_query_router_distinguishes_temporal_category_and_query_terms():
     decision = MemoryQueryRouter().route(
         "What preferences do you have on file for my voice settings?"

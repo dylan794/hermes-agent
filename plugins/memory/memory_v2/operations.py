@@ -278,32 +278,74 @@ class MemoryOperationService:
             return self._error("supersede_memory", "old_id and new_id must differ")
         if not reason:
             return self._error("supersede_memory", "reason is required")
-        old_item = self.store.read_memory_item(old_id)
-        new_item = self.store.read_memory_item(new_id)
-        if old_item is None or new_item is None:
-            return self._error("supersede_memory", f"memory item not found: {old_id if old_item is None else new_id}")
-        self._apply_supersession_fields(old_item, superseded_by=new_id, reason=reason, tag=tag)
-        if old_id not in new_item.supersedes:
-            new_item.supersedes.append(old_id)
-        new_item.updated_at = utc_now_iso()
-        old_path = self.store.write_memory_item(old_item)
-        new_path = self.store.write_memory_item(new_item)
-        self.index.index_memory_item(old_item, file_path=old_path)
-        self.index.index_memory_item(new_item, file_path=new_path)
-        self._validate_memory_items_invariants()
-        op = self._audit(
-            "supersede_memory",
-            actor=actor,
-            reason=reason,
-            source_refs=self._unique(list(old_item.source_refs) + list(new_item.source_refs)),
-            before_ids=[old_id, new_id],
-            after_ids=[old_id, new_id],
-            metadata={"superseded_id": old_id, "superseded_by": new_id},
-        )
+        operation_id = f"op_{uuid.uuid4().hex}"
+        operation_type = "supersede_memory"
+        canonical_write_started = False
+        source_refs: List[str] = []
+        try:
+            with self.store.profile_lock():
+                interrupted = self._interrupted_operations()
+                if interrupted:
+                    return self._error(
+                        operation_type,
+                        f"interrupted operation blocks canonical mutation: {interrupted[0]['operation_id']}",
+                    )
+                old_item = self.store.read_memory_item(old_id)
+                new_item = self.store.read_memory_item(new_id)
+                if old_item is None or new_item is None:
+                    return self._error(operation_type, f"memory item not found: {old_id if old_item is None else new_id}")
+                source_refs = self._unique(list(old_item.source_refs) + list(new_item.source_refs))
+                self._audit(
+                    operation_type,
+                    operation_id=operation_id,
+                    status="prepared",
+                    actor=actor,
+                    reason=reason,
+                    source_refs=source_refs,
+                    before_ids=[old_id, new_id],
+                    after_ids=[old_id, new_id],
+                    metadata={"superseded_id": old_id, "superseded_by": new_id},
+                )
+                self._maybe_failpoint("after_operation_prepare")
+                self._apply_supersession_fields(old_item, superseded_by=new_id, reason=reason, tag=tag)
+                if old_id not in new_item.supersedes:
+                    new_item.supersedes.append(old_id)
+                new_item.updated_at = utc_now_iso()
+                canonical_write_started = True
+                old_path = self.store.write_memory_item(old_item)
+                self._maybe_failpoint("after_supersede_memory_write")
+                new_path = self.store.write_memory_item(new_item)
+                self.index.index_memory_item(old_item, file_path=old_path)
+                self.index.index_memory_item(new_item, file_path=new_path)
+                self._validate_memory_items_invariants()
+                self._audit(
+                    operation_type,
+                    operation_id=operation_id,
+                    status="committed",
+                    actor=actor,
+                    reason=reason,
+                    source_refs=source_refs,
+                    before_ids=[old_id, new_id],
+                    after_ids=[old_id, new_id],
+                    metadata={"superseded_id": old_id, "superseded_by": new_id},
+                )
+        except Exception as exc:
+            self._audit(
+                operation_type,
+                operation_id=operation_id,
+                status="recovery_required" if canonical_write_started else "failed",
+                actor=actor,
+                reason=reason,
+                source_refs=source_refs,
+                before_ids=[old_id, new_id],
+                after_ids=[old_id, new_id],
+                metadata={"error": str(exc)},
+            )
+            return self._error(operation_type, str(exc))
         return MemoryOperationResult(
             success=True,
-            operation_id=op["operation_id"],
-            operation_type="supersede_memory",
+            operation_id=operation_id,
+            operation_type=operation_type,
             ids=[old_id, new_id],
             payload={"superseded_id": old_id, "superseded_by": new_id, "reason": reason},
         )
