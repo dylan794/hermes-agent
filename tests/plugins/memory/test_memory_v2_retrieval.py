@@ -121,7 +121,7 @@ def test_packet_composer_exact_route_includes_only_active_session_raw_events(tmp
         summary="session-active cobalt nebula",
         status="archived",
         source_refs=["evt_exact_active"],
-        tags=["session-active"],
+        tags=["session:session-active"],
     )
     index.index_record(
         id="evt_exact_other",
@@ -131,7 +131,7 @@ def test_packet_composer_exact_route_includes_only_active_session_raw_events(tmp
         summary="session-other cobalt nebula",
         status="archived",
         source_refs=["evt_exact_other"],
-        tags=["session-other"],
+        tags=["session:session-other"],
     )
 
     composer = MemoryPacketComposer(index, include_raw_events=True)
@@ -145,6 +145,31 @@ def test_packet_composer_exact_route_includes_only_active_session_raw_events(tmp
         "What did I say about the exact launch phrase cobalt nebula?"
     )
     assert not any(item["type"] == "raw_event" for item in no_authority.items)
+
+
+def test_packet_composer_raw_session_filter_rejects_prefix_and_content_collisions(tmp_path):
+    _store, index = _store_and_index(tmp_path)
+    for event_id, session_tag, body in (
+        ("evt_session_1", "session:session-1", "private active-session evidence"),
+        ("evt_session_10", "session:session-10", "private prefix-collision evidence"),
+        ("evt_content_collision", "session:session-other", "content mentions session-1 but belongs elsewhere"),
+    ):
+        index.index_record(
+            id=event_id,
+            type="raw_event",
+            title="Exact session privacy phrase",
+            body=body,
+            summary="exact session privacy phrase",
+            status="archived",
+            source_refs=[event_id],
+            tags=[session_tag],
+        )
+
+    packet = MemoryPacketComposer(index, include_raw_events=True).compose(
+        "What did I say about the exact session privacy phrase?",
+        session_id="session-1",
+    )
+    assert [item["id"] for item in packet.items] == ["evt_session_1"]
 
 
 def test_memory_query_router_distinguishes_temporal_category_and_query_terms():

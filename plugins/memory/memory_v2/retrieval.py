@@ -748,17 +748,17 @@ class MemoryPacketComposer:
         if not active_session:
             return results
         filtered: List[Dict[str, Any]] = []
-        needle = active_session.lower()
+        expected_tag = f"session:{active_session}".lower()
         for result in results:
             if str(result.get("type") or "") != "raw_event":
                 filtered.append(result)
                 continue
-            haystacks = [
-                str(result.get("body") or ""),
-                str(result.get("summary") or ""),
-                " ".join(str(tag) for tag in (result.get("tags") or [])),
-            ]
-            if any(needle in haystack.lower() for haystack in haystacks):
+            tags = {
+                str(tag).strip().lower()
+                for tag in (result.get("tags") or [])
+                if str(tag).strip()
+            }
+            if expected_tag in tags:
                 filtered.append(result)
         return filtered
 
