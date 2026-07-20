@@ -122,6 +122,23 @@ class RuleBasedWriteGate:
                 reason="Claim appears ephemeral; archive only instead of creating durable memory landfill.",
             )
 
+        # Parse explicit project-field syntax before generic conflict/procedure
+        # rules. A project decision such as "use A instead of B" remains a
+        # structured project update rather than a free-floating contradiction.
+        project_update_kind = self._project_update_kind_for_claim(claim)
+        if project_update_kind and self._contains(lowered, self._PROJECT_TERMS):
+            return WriteGateDecision(
+                outcome=WriteGateOutcome.PROJECT_UPDATE,
+                claim=claim,
+                memory_type="project_state",
+                proposed_destination=self._project_destination_for_claim(claim),
+                importance=0.8,
+                confidence=0.8,
+                reason=f"project_update: {project_update_kind}",
+                should_create_candidate=True,
+                requires_review=True,
+            )
+
         if self._looks_like_conflict(full_lowered):
             return WriteGateDecision(
                 outcome=WriteGateOutcome.SUPERSEDE_EXISTING,

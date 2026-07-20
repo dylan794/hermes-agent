@@ -975,11 +975,20 @@ def test_packet_composer_v2_sorts_current_and_stale_facts_into_separate_sections
     )
     parsed = yaml.safe_load(MemoryPacketComposer.render(packet))
 
-    assert parsed["sections"]["current_beliefs"][0]["id"] == "pref_current_voice"
-    assert parsed["sections"]["stale_or_superseded"][0]["id"] == "pref_old_voice"
-    assert "pref_old_voice" not in [
-        item["id"] for item in parsed["sections"]["current_beliefs"]
-    ]
+    assert parsed["sections"]["current_beliefs"][0]["item_ref"] == "pref_current_voice"
+    assert "stale_or_superseded" not in parsed["sections"]
+    assert [item["id"] for item in packet.items] == ["pref_current_voice"]
+
+    history = MemoryPacketComposer(index).compose(
+        "Which TTS voice preference is stale or superseded for Alex?"
+    )
+    history_parsed = yaml.safe_load(MemoryPacketComposer.render(history))
+    assert history.route == "contradiction_check"
+    assert {item["id"] for item in history.items} == {
+        "pref_current_voice",
+        "pref_old_voice",
+    }
+    assert history_parsed["sections"]["stale_or_superseded"][0]["item_ref"] == "pref_old_voice"
 
 
 def test_packet_composer_v2_sections_stay_compact_under_budget(tmp_path):
@@ -1000,7 +1009,7 @@ def test_packet_composer_v2_sections_stay_compact_under_budget(tmp_path):
     rendered = MemoryPacketComposer.render(packet)
     parsed = yaml.safe_load(rendered)
 
-    assert parsed["sections"]["active_project_state"][0]["id"] == "project:huge-project"
+    assert parsed["sections"]["active_project_state"][0]["item_ref"] == "project:huge-project"
     assert len(rendered) <= packet.token_budget * 8
 
 
@@ -1387,8 +1396,7 @@ def test_packet_composer_prefers_promoted_canonical_item_over_promoted_candidate
     assert packet.items[0]["status"] == "active"
     assert "active promoted canonical memory" in packet.items[0]["summary"]
     candidate_items = [item for item in packet.items if item["type"] == "candidate"]
-    assert candidate_items
-    assert candidate_items[0]["candidate_decision"] == "promoted"
+    assert candidate_items == []
 
 
 def test_packet_composer_exposes_candidate_decision_and_reason_without_active_belief(

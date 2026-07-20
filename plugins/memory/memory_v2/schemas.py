@@ -477,6 +477,9 @@ class ProjectCard:
     source_refs: List[str] = field(default_factory=list)
     related_entities: List[str] = field(default_factory=list)
     injection_policy: Dict[str, Any] = field(default_factory=dict)
+    # Append-only, source-grounded lifecycle records for individual project fields.
+    # Legacy cards omit this field and continue to load unchanged.
+    field_evidence: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.id = normalize_project_id(self.id)
@@ -489,6 +492,47 @@ class ProjectCard:
         self.source_refs = _list_of_strings(self.source_refs)
         self.related_entities = _list_of_strings(self.related_entities)
         self.injection_policy = dict(self.injection_policy or {})
+        self.field_evidence = self._validate_field_evidence(self.field_evidence)
+
+    @staticmethod
+    def _validate_field_evidence(value: Any) -> Dict[str, List[Dict[str, Any]]]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValidationError("field_evidence must be an object")
+        validated: Dict[str, List[Dict[str, Any]]] = {}
+        for raw_field, raw_entries in value.items():
+            field_name = str(raw_field or "").strip()
+            if not field_name or not isinstance(raw_entries, list):
+                raise ValidationError("field_evidence entries must be lists")
+            entries: List[Dict[str, Any]] = []
+            for raw_entry in raw_entries:
+                if not isinstance(raw_entry, dict):
+                    raise ValidationError("field_evidence records must be objects")
+                entry = dict(raw_entry)
+                entry["value"] = str(entry.get("value") or "").strip()
+                if not entry["value"]:
+                    raise ValidationError("field_evidence.value must be nonblank")
+                entry["status"] = str(entry.get("status") or "current").strip().lower()
+                if entry["status"] not in {"current", "superseded", "resolved", "stale"}:
+                    raise ValidationError("field_evidence.status is invalid")
+                entry["observed_at"] = str(entry.get("observed_at") or "")
+                entry["source_refs"] = sorted(set(_list_of_strings(entry.get("source_refs"))))
+                candidate_id = str(entry.get("candidate_id") or "").strip()
+                if candidate_id:
+                    entry["candidate_id"] = candidate_id
+                else:
+                    entry.pop("candidate_id", None)
+                entries.append(entry)
+            validated[field_name] = sorted(
+                entries,
+                key=lambda item: (
+                    str(item.get("observed_at") or ""),
+                    str(item.get("candidate_id") or ""),
+                    str(item.get("value") or ""),
+                ),
+            )
+        return dict(sorted(validated.items()))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -506,6 +550,10 @@ class ProjectCard:
             "source_refs": list(self.source_refs),
             "related_entities": list(self.related_entities),
             "injection_policy": dict(self.injection_policy),
+            "field_evidence": {
+                key: [dict(entry) for entry in entries]
+                for key, entries in self.field_evidence.items()
+            },
         }
 
     @classmethod

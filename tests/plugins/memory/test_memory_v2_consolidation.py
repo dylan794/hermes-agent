@@ -246,7 +246,7 @@ def test_consolidation_merges_project_state_candidate_into_project_card(tmp_path
     assert card.current_state == "project-card consolidation is the next architectural unlock."
     assert card.decisions == ["Use local files as durable truth."]
     assert card.next_actions == ["Add candidate promotion."]
-    assert card.source_refs == ["event_old", "event_new"]
+    assert card.source_refs == ["event_new", "event_old"]
     updated = store.list_candidates()[0]
     assert updated.gate_decision == GateDecision.PROMOTED
     assert "ProjectCard project:memory-v2" in updated.decision_reason
@@ -303,7 +303,7 @@ def test_consolidation_project_updates_merge_lists_status_and_dedupe_sources(tmp
     assert card.decisions == ["consolidate project updates into semantic/projects cards."]
     assert card.open_questions == ["how strict should source-ref validation be?"]
     assert card.next_actions == ["add manual promote and reject tools."]
-    assert card.source_refs == ["event_decision", "event_question", "event_pause"]
+    assert card.source_refs == ["event_decision", "event_pause", "event_question"]
     assert {candidate.gate_decision for candidate in store.list_candidates()} == {GateDecision.PROMOTED}
 
 

@@ -383,6 +383,14 @@ class MemoryV2Index:
                 sources.append(source)
         return sources
 
+    def record_exists(self, record_id: str) -> bool:
+        """Return whether a canonical/index record exists by exact id."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM memories WHERE id = ? LIMIT 1", (str(record_id),)
+            ).fetchone()
+        return row is not None
+
     def index_memory_item(self, item: MemoryItem, *, file_path: str | Path | None = None) -> None:
         """Index a canonical semantic/core memory item from fixture or store data."""
         payload = item.to_dict()
@@ -438,6 +446,10 @@ class MemoryV2Index:
             "open_questions": list(card.open_questions),
             "next_actions": list(card.next_actions),
             "related_entities": list(card.related_entities),
+            "field_evidence": {
+                key: [dict(entry) for entry in entries]
+                for key, entries in card.field_evidence.items()
+            },
         }
         self.index_record(
             id=card.id,
@@ -463,6 +475,19 @@ class MemoryV2Index:
             candidate.promotion_reason,
             candidate.decision_reason,
         ]
+        tags = [
+            "candidate",
+            candidate_type,
+            gate_decision,
+            claim_kind,
+            candidate.extraction_method,
+        ]
+        successor = re.search(
+            r"Promoted to (?:canonical MemoryItem|ProjectCard)\s+([^\s.]+)",
+            candidate.decision_reason,
+        )
+        if successor:
+            tags.append(f"successor:{successor.group(1)}")
         self.index_record(
             id=candidate.id,
             type="candidate",
@@ -477,13 +502,7 @@ class MemoryV2Index:
             importance=candidate.importance,
             created_at=candidate.created_at,
             source_refs=candidate.source_refs,
-            tags=[
-                "candidate",
-                candidate_type,
-                gate_decision,
-                claim_kind,
-                candidate.extraction_method,
-            ],
+            tags=tags,
             file_path="inbox/candidates.jsonl",
         )
 

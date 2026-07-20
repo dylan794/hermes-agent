@@ -78,6 +78,7 @@ class MemoryQueryRouter:
     PROCEDURE_PATTERNS = (
         "how do i",
         "how should i",
+        "how should we",
         "how should we troubleshoot",
         "troubleshoot or modify",
         "modify hermes memory providers",
@@ -274,6 +275,11 @@ class MemoryQueryRouter:
             scores["past_conversation_exact"] += 2
         if lowered.startswith("remember that") and " not " in lowered:
             scores["contradiction_check"] += 2
+        if scores["contradiction_check"] > 0 and any(
+            term in lowered
+            for term in ("stale", "superseded", "outdated", "conflict", "contradict")
+        ):
+            scores["contradiction_check"] += 4
         if lowered.startswith("remember that i"):
             scores["preference_recall"] += 2
         if any(term in lowered for term in ("prefer", "preferences", "preference")):
@@ -810,7 +816,10 @@ class MemoryPacketComposer:
                     source_refs_by_id[source_id] = self._compact_source_ref(source)
         sections["source_refs"] = list(source_refs_by_id.values())[:3]
         sections["top_answer_context"] = self._top_answer_context(items, decision)
-        sections["supporting_sources"] = list(source_refs_by_id.values())[:3]
+        sections["supporting_sources"] = [
+            {"source_ref": source_id}
+            for source_id in list(source_refs_by_id)[:3]
+        ]
         sections["uncertainty"] = self._uncertainty_summary(items, decision)
         if decision.needs_source_verification:
             sections["source_verification"] = self._source_verification_section(items)
@@ -995,29 +1004,11 @@ class MemoryPacketComposer:
 
     @staticmethod
     def _compact_section_item(item: Dict[str, Any]) -> Dict[str, Any]:
-        compact: Dict[str, Any] = {
-            "id": item.get("id", ""),
-            "type": item.get("type", ""),
-            "summary": MemoryPacketComposer._truncate(item.get("summary", ""), 240),
-            "status": item.get("status", ""),
-            "source_refs": list(item.get("source_refs") or []),
-            "updated_at": item.get("updated_at", ""),
-        }
-        for field in ("superseded_by",):
-            value = item.get(field)
-            if value not in (None, "", []):
-                compact[field] = (
-                    MemoryPacketComposer._truncate(value, 180)
-                    if isinstance(value, str)
-                    else value
-                )
-        if "project" in item:
-            compact["project"] = MemoryPacketComposer._compact_project_fields(
-                dict(item.get("project") or {})
-            )
-        return {
-            key: value for key, value in compact.items() if value not in ("", [], None)
-        }
+        # Sections classify canonical packet items by reference. Re-rendering the
+        # same body and source list in several sections can otherwise consume the
+        # complete packet budget for a single useful result.
+        item_id = str(item.get("id") or "")
+        return {"item_ref": item_id} if item_id else {}
 
     @staticmethod
     def _compact_project_fields(project: Dict[str, Any]) -> Dict[str, Any]:
@@ -1114,17 +1105,58 @@ class MemoryPacketComposer:
                     seen.add(item_id)
         return expanded[: max(decision.search_limit * 2, decision.search_limit)]
 
-    @staticmethod
     def _filter_for_decision(
+        self,
         results: List[Dict[str, Any]], decision: RoutingDecision
+    ) -> List[Dict[str, Any]]:
+        return self._filter_items_for_decision(
+            results, decision, record_exists=self.index.record_exists
+        )
+
+    @staticmethod
+    def _filter_items_for_decision(
+        results: List[Dict[str, Any]],
+        decision: RoutingDecision,
+        *,
+        record_exists: Any = None,
     ) -> List[Dict[str, Any]]:
         allowed = set(decision.target_types)
         disallowed_statuses = {"rejected", "archived_only"}
-        filtered = [
-            item
-            for item in results
-            if str(item.get("status") or "") not in disallowed_statuses
-        ]
+        history_routes = {"contradiction_check", "deep_recall", "past_conversation_exact"}
+        candidate_types = {
+            "project_continuity": {"project_state"},
+            "preference_recall": {"preference"},
+            "procedure_lookup": {"procedure_ref"},
+            "environment_fact": {"environment", "fact"},
+            "research_recall": {"fact", "project_state"},
+            "contradiction_check": {"preference", "fact", "project_state", "environment"},
+            "current_task": {"project_state", "preference", "fact", "environment", "episode"},
+        }.get(decision.route)
+        filtered: List[Dict[str, Any]] = []
+        for item in results:
+            status = str(item.get("status") or "")
+            if status in disallowed_statuses:
+                continue
+            if decision.route not in history_routes and (
+                status in {"superseded", "resolved", "stale", "closed"}
+                or bool(item.get("superseded_by"))
+            ):
+                continue
+            if str(item.get("type") or "") == "candidate":
+                intended_type = str(item.get("subject") or "")
+                if candidate_types is not None and intended_type not in candidate_types:
+                    continue
+                if status == "promoted":
+                    successor_ids = [
+                        str(tag).split(":", 1)[1]
+                        for tag in (item.get("tags") or [])
+                        if str(tag).startswith("successor:")
+                    ]
+                    if successor_ids and record_exists and any(
+                        record_exists(successor_id) for successor_id in successor_ids
+                    ):
+                        continue
+            filtered.append(item)
         if not allowed:
             return filtered
         return [item for item in filtered if str(item.get("type") or "") in allowed]
@@ -1187,7 +1219,7 @@ class MemoryPacketComposer:
             search_limit=0,
             target_types=MemoryQueryRouter._target_types(route),
         )
-        return MemoryPacketComposer._filter_for_decision(results, decision)
+        return MemoryPacketComposer._filter_items_for_decision(results, decision)
 
     @staticmethod
     def _rank_for_decision(
@@ -1311,9 +1343,21 @@ class MemoryPacketComposer:
                     sections=self._compose_sections(compact, decision),
                     retrieval_plan=self._retrieval_plan(decision),
                 )
+                if self._estimate_tokens(self.render(compact_trial)) <= decision.token_budget:
+                    return compact
+                minimum = [self._minimum_useful_item(fitted[0])]
+                minimum_trial = MemoryPacket(
+                    route=decision.route,
+                    confidence=decision.confidence,
+                    token_budget=decision.token_budget,
+                    items=minimum,
+                    warnings=self._warnings(minimum),
+                    sections=self._compose_sections(minimum, decision),
+                    retrieval_plan=self._retrieval_plan(decision),
+                )
                 return (
-                    compact
-                    if self._estimate_tokens(self.render(compact_trial))
+                    minimum
+                    if self._estimate_tokens(self.render(minimum_trial))
                     <= decision.token_budget
                     else []
                 )
@@ -1355,6 +1399,39 @@ class MemoryPacketComposer:
                 compact[key] = value
         return compact
 
+    @staticmethod
+    def _minimum_useful_item(item: Dict[str, Any]) -> Dict[str, Any]:
+        compact: Dict[str, Any] = {
+            "id": item.get("id", ""),
+            "type": item.get("type", ""),
+            "status": item.get("status", ""),
+            "summary": MemoryPacketComposer._truncate(item.get("summary", ""), 180),
+        }
+        source_refs = list(item.get("source_refs") or [])
+        if source_refs:
+            compact["source_refs"] = source_refs[:1]
+            if len(source_refs) > 1:
+                compact["source_ref_count"] = int(
+                    item.get("source_ref_count") or len(source_refs)
+                )
+        if item.get("project"):
+            project = dict(item.get("project") or {})
+            compact["project"] = {
+                key: value
+                for key, value in {
+                    "name": MemoryPacketComposer._truncate(project.get("name", ""), 100),
+                    "current_state": MemoryPacketComposer._truncate(project.get("current_state", ""), 180),
+                    "next_actions": [
+                        MemoryPacketComposer._truncate(value, 140)
+                        for value in MemoryPacketComposer._project_list(
+                            project.get("next_actions")
+                        )[:1]
+                    ],
+                }.items()
+                if value not in ("", [], None)
+            }
+        return {key: value for key, value in compact.items() if value not in ("", [], None)}
+
     def _bounded_items(
         self, results: List[Dict[str, Any]], token_budget: int
     ) -> List[Dict[str, Any]]:
@@ -1374,10 +1451,14 @@ class MemoryPacketComposer:
                 "summary": result.get("summary", "")
                 or MemoryPacketComposer._truncate(result.get("body", ""), 280),
                 "status": result.get("status", ""),
-                "source_refs": list(result.get("source_refs") or []),
+                "source_refs": list(result.get("source_refs") or [])[:8],
                 "file_path": self._safe_packet_file_path(result.get("file_path", "")),
                 "updated_at": result.get("updated_at", ""),
             }
+            total_source_refs = len(result.get("source_refs") or [])
+            if total_source_refs > len(item["source_refs"]):
+                item["source_ref_count"] = total_source_refs
+                item["source_refs_truncated"] = True
             if "hybrid_score" in result:
                 item["hybrid_score"] = result.get("hybrid_score")
             if "score_components" in result:
@@ -1456,10 +1537,37 @@ class MemoryPacketComposer:
             "related_entities": MemoryPacketComposer._project_list(
                 parsed.get("related_entities")
             ),
+            "field_evidence": MemoryPacketComposer._current_project_evidence(
+                parsed.get("field_evidence")
+            ),
         }
         return {
             key: value for key, value in project.items() if value not in ("", [], None)
         }
+
+    @staticmethod
+    def _current_project_evidence(value: Any) -> Dict[str, List[Dict[str, Any]]]:
+        if not isinstance(value, dict):
+            return {}
+        current: Dict[str, List[Dict[str, Any]]] = {}
+        for field_name, raw_entries in value.items():
+            if not isinstance(raw_entries, list):
+                continue
+            entries = []
+            for raw_entry in raw_entries:
+                if not isinstance(raw_entry, dict) or str(raw_entry.get("status") or "") != "current":
+                    continue
+                entry = {
+                    "value": MemoryPacketComposer._truncate(raw_entry.get("value", ""), 180),
+                    "observed_at": raw_entry.get("observed_at", ""),
+                    "source_refs": list(raw_entry.get("source_refs") or [])[:3],
+                }
+                entries.append(
+                    {key: inner for key, inner in entry.items() if inner not in ("", [], None)}
+                )
+            if entries:
+                current[str(field_name)] = entries[:3]
+        return current
 
     @staticmethod
     def _project_list(value: Any) -> List[str]:

@@ -13,6 +13,7 @@ import hashlib
 import re
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import List, cast
 
 from .index import MemoryV2Index
@@ -402,29 +403,259 @@ class RuleBasedConsolidator:
     def _merge_project_card(self, candidate: CandidateMemory, store: MemoryV2Store) -> ProjectCard:
         project_id = self._project_id_for(candidate)
         existing = store.read_project_card(project_id)
-        card = existing or ProjectCard(id=project_id, name=self._project_name_for(project_id), importance=candidate.importance)
+        card = existing or ProjectCard(
+            id=project_id,
+            name=self._project_name_for(project_id),
+            importance=candidate.importance,
+            updated_at="",
+        )
         update_kind = self._project_update_kind(candidate)
         update_text = self._project_update_text(candidate, update_kind)
-
-        if update_kind == "goal":
-            card.goal = update_text
-        elif update_kind == "why_it_matters":
-            card.why_it_matters = update_text
-        elif update_kind == "decision":
-            card.decisions = self._append_unique(card.decisions, update_text)
-        elif update_kind == "open_question":
-            card.open_questions = self._append_unique(card.open_questions, update_text)
-        elif update_kind == "next_action":
-            card.next_actions = self._append_unique(card.next_actions, update_text)
-        elif update_kind == "status":
-            card.status = self._project_status_from_text(update_text)
+        evidence_time = self._project_evidence_time(candidate, store)
+        evidence = self._bootstrap_project_evidence(card)
+        if update_kind in {"next_action_resolved", "next_action_stale"}:
+            lifecycle = "resolved" if update_kind.endswith("resolved") else "stale"
+            self._close_project_values(
+                evidence,
+                "next_actions",
+                update_text,
+                lifecycle,
+                evidence_time,
+                candidate,
+            )
         else:
-            card.current_state = update_text
-
+            field_name = {
+                "goal": "goal",
+                "why_it_matters": "why_it_matters",
+                "decision": "decisions",
+                "open_question": "open_questions",
+                "next_action": "next_actions",
+                "status": "status",
+                "current_state": "current_state",
+            }.get(update_kind, "current_state")
+            if field_name == "status":
+                update_text = self._project_status_from_text(update_text).value
+            self._add_project_evidence(
+                evidence,
+                field_name,
+                update_text,
+                evidence_time,
+                candidate,
+            )
+        self._apply_project_lifecycle(evidence, "next_actions")
+        card.field_evidence = self._normalize_project_evidence(evidence)
+        self._materialize_project_fields(card)
         card.importance = max(card.importance, candidate.importance)
-        card.source_refs = self._append_unique(card.source_refs, *candidate.source_refs)
-        card.updated_at = utc_now_iso()
+        card.source_refs = sorted(
+            {
+                str(source_ref)
+                for entries in card.field_evidence.values()
+                for entry in entries
+                for source_ref in (entry.get("source_refs") or [])
+                if str(source_ref)
+            }
+        )
+        observed_times = [
+            str(entry.get("observed_at") or "")
+            for entries in card.field_evidence.values()
+            for entry in entries
+            if entry.get("observed_at")
+        ]
+        card.updated_at = max(observed_times, key=self._timestamp_key, default=card.updated_at)
         return ProjectCard.from_dict(card.to_dict())
+
+    @classmethod
+    def _project_evidence_time(cls, candidate: CandidateMemory, store: MemoryV2Store) -> str:
+        source_timestamps: List[str] = []
+        for source_id in candidate.source_refs:
+            source = store.read_source_ref(source_id)
+            if source and source.observed_at:
+                source_timestamps.append(str(source.observed_at))
+        if source_timestamps:
+            return max(source_timestamps, key=cls._timestamp_key)
+        return str(candidate.created_at or utc_now_iso())
+
+    @staticmethod
+    def _timestamp_key(value: str) -> tuple[float, str]:
+        text = str(value or "")
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp(), text
+        except ValueError:
+            return 0.0, text
+
+    @staticmethod
+    def _bootstrap_project_evidence(card: ProjectCard) -> dict[str, List[dict]]:
+        if card.field_evidence:
+            return {
+                field_name: [dict(entry) for entry in entries]
+                for field_name, entries in card.field_evidence.items()
+            }
+        evidence: dict[str, List[dict]] = {}
+        values = {
+            "goal": [card.goal],
+            "why_it_matters": [card.why_it_matters],
+            "current_state": [card.current_state],
+            "status": [cast(ProjectStatus, card.status).value],
+            "decisions": list(card.decisions),
+            "open_questions": list(card.open_questions),
+            "next_actions": list(card.next_actions),
+        }
+        for field_name, field_values in values.items():
+            for value in field_values:
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                evidence.setdefault(field_name, []).append(
+                    {
+                        "value": text,
+                        "status": "current",
+                        "observed_at": card.updated_at,
+                        "source_refs": sorted(set(card.source_refs)),
+                    }
+                )
+        return evidence
+
+    @classmethod
+    def _add_project_evidence(
+        cls,
+        evidence: dict[str, List[dict]],
+        field_name: str,
+        value: str,
+        observed_at: str,
+        candidate: CandidateMemory,
+    ) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        entries = evidence.setdefault(field_name, [])
+        for entry in entries:
+            if (
+                str(entry.get("value") or "") == text
+                and str(entry.get("observed_at") or "") == observed_at
+            ):
+                entry["source_refs"] = sorted(
+                    set(entry.get("source_refs") or []) | set(candidate.source_refs)
+                )
+                entry["candidate_id"] = min(
+                    str(entry.get("candidate_id") or candidate.id), candidate.id
+                )
+                return
+        entries.append(
+            {
+                "value": text,
+                "status": "current",
+                "observed_at": observed_at,
+                "source_refs": sorted(set(candidate.source_refs)),
+                "candidate_id": candidate.id,
+            }
+        )
+        if field_name in {"goal", "why_it_matters", "current_state", "status"}:
+            newest = max(
+                entries,
+                key=lambda entry: (
+                    cls._timestamp_key(str(entry.get("observed_at") or "")),
+                    str(entry.get("candidate_id") or ""),
+                    str(entry.get("value") or ""),
+                ),
+            )
+            for entry in entries:
+                entry["status"] = "current" if entry is newest else "superseded"
+
+    @staticmethod
+    def _close_project_values(
+        evidence: dict[str, List[dict]],
+        field_name: str,
+        target: str,
+        lifecycle: str,
+        observed_at: str,
+        candidate: CandidateMemory,
+    ) -> None:
+        evidence.setdefault(field_name, []).append(
+            {
+                "value": str(target or "").strip() or "*",
+                "status": lifecycle,
+                "observed_at": observed_at,
+                "source_refs": sorted(set(candidate.source_refs)),
+                "candidate_id": candidate.id,
+                "lifecycle_event": True,
+            }
+        )
+
+    @classmethod
+    def _apply_project_lifecycle(
+        cls, evidence: dict[str, List[dict]], field_name: str
+    ) -> None:
+        entries = evidence.get(field_name, [])
+        values = [entry for entry in entries if not entry.get("lifecycle_event")]
+        events = sorted(
+            (entry for entry in entries if entry.get("lifecycle_event")),
+            key=lambda entry: (
+                cls._timestamp_key(str(entry.get("observed_at") or "")),
+                str(entry.get("candidate_id") or ""),
+            ),
+        )
+        for entry in values:
+            entry["status"] = "current"
+            for key in (
+                "resolved_at",
+                "resolved_source_refs",
+                "resolved_candidate_id",
+                "stale_at",
+                "stale_source_refs",
+                "stale_candidate_id",
+            ):
+                entry.pop(key, None)
+        for event in events:
+            needle = re.sub(r"\s+", " ", str(event.get("value") or "").lower())
+            event_time = str(event.get("observed_at") or "")
+            lifecycle = str(event.get("status") or "resolved")
+            for entry in values:
+                haystack = re.sub(r"\s+", " ", str(entry.get("value") or "").lower())
+                if cls._timestamp_key(str(entry.get("observed_at") or "")) > cls._timestamp_key(event_time):
+                    continue
+                if needle not in {"", "*"} and needle not in haystack and haystack not in needle:
+                    continue
+                entry["status"] = lifecycle
+                entry[f"{lifecycle}_at"] = event_time
+                entry[f"{lifecycle}_source_refs"] = list(event.get("source_refs") or [])
+                entry[f"{lifecycle}_candidate_id"] = str(event.get("candidate_id") or "")
+
+    @staticmethod
+    def _normalize_project_evidence(evidence: dict[str, List[dict]]) -> dict[str, List[dict]]:
+        return {
+            field_name: sorted(
+                (dict(entry) for entry in entries),
+                key=lambda entry: (
+                    str(entry.get("observed_at") or ""),
+                    str(entry.get("candidate_id") or ""),
+                    str(entry.get("value") or ""),
+                ),
+            )
+            for field_name, entries in sorted(evidence.items())
+        }
+
+    @staticmethod
+    def _materialize_project_fields(card: ProjectCard) -> None:
+        def current_values(field_name: str) -> List[str]:
+            return [
+                str(entry.get("value") or "")
+                for entry in card.field_evidence.get(field_name, [])
+                if str(entry.get("status") or "") == "current"
+                and not entry.get("lifecycle_event")
+                and str(entry.get("value") or "")
+            ]
+
+        card.goal = (current_values("goal") or [""])[-1]
+        card.why_it_matters = (current_values("why_it_matters") or [""])[-1]
+        card.current_state = (current_values("current_state") or [""])[-1]
+        status = (current_values("status") or [cast(ProjectStatus, card.status).value])[-1]
+        card.status = ProjectStatus.coerce(status, "status")
+        card.decisions = current_values("decisions")
+        card.open_questions = current_values("open_questions")
+        card.next_actions = current_values("next_actions")
 
     @staticmethod
     def _project_id_for(candidate: CandidateMemory) -> str:
@@ -432,7 +663,7 @@ class RuleBasedConsolidator:
         match = re.search(r"semantic/projects/([^/]+?)(?:\.ya?ml)?$", destination)
         if match:
             return normalize_project_id(match.group(1))
-        match = re.search(r"\bproject\s+(.+?)\s+(?:current state|decision|open question|next action|status|goal|why it matters)\s*:", candidate.claim, re.IGNORECASE)
+        match = re.search(r"\bproject\s+(.+?)\s+(?:(?:resolved|stale|completed)\s+)?(?:current state|decision|open question|next action|status|goal|why it matters)(?:\s+(?:resolved|stale|completed))?\s*:", candidate.claim, re.IGNORECASE)
         if match:
             return normalize_project_id(match.group(1))
         return normalize_project_id("project")
@@ -445,6 +676,11 @@ class RuleBasedConsolidator:
     @staticmethod
     def _project_update_kind(candidate: CandidateMemory) -> str:
         text = f"{candidate.promotion_reason}\n{candidate.claim}".lower()
+        if "next action" in text or "next_action" in text:
+            if any(term in text for term in ("resolved", "completed", "done")):
+                return "next_action_resolved"
+            if any(term in text for term in ("stale", "obsolete", "cancelled", "canceled")):
+                return "next_action_stale"
         if "open_question" in text or "open question" in text:
             return "open_question"
         if "next_action" in text or "next action" in text:
@@ -458,6 +694,17 @@ class RuleBasedConsolidator:
 
     @staticmethod
     def _project_update_text(candidate: CandidateMemory, update_kind: str) -> str:
+        if update_kind in {"next_action_resolved", "next_action_stale"}:
+            patterns = [
+                r"^\s*project\s+.+?\s+(?:resolved|completed|stale|obsolete|cancelled|canceled)\s+next\s+action\s*:\s*(.*?)\s*$",
+                r"^\s*project\s+.+?\s+next\s+action\s+(?:resolved|completed|stale|obsolete|cancelled|canceled)\s*:\s*(.*?)\s*$",
+                r"^\s*(?:resolved|completed|stale|obsolete|cancelled|canceled)\s+next\s+action\s*:\s*(.*?)\s*$",
+            ]
+            for pattern in patterns:
+                match = re.match(pattern, candidate.claim, re.IGNORECASE)
+                if match:
+                    return match.group(1).strip()
+            return ""
         label = update_kind.replace("_", r"[ _]")
         patterns = [
             rf"^\s*project\s+.+?\s+{label}\s*:\s*(.+?)\s*$",
