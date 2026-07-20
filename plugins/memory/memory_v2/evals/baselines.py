@@ -14,11 +14,27 @@ from typing import Any, Protocol
 import yaml
 
 from ..index import MemoryV2Index
+from ..operations import MemoryOperationService, candidate_fingerprint
 from ..redaction import contains_sensitive_text, redact_text
 from ..retrieval import MemoryQueryRouter
+from ..schemas import GateDecision, MemoryType
 from ..store import MemoryV2Store
 from .datasets import EvalEvent, EvalQuery
 from .metrics import estimate_tokens
+
+
+_EVAL_MUTATION_POLICY = {
+    "authority_source": "eval_harness",
+    "authorized_scope": "auto_promote",
+    "required_platform": "eval",
+    "model_arguments_can_authorize": False,
+    "project_card_policy": "trusted_eval_operator_review",
+}
+
+
+def _authorize_eval_auto_promote(scope: str, context: dict[str, Any]) -> bool:
+    """Grant the eval harness's narrow, non-model mutation authority."""
+    return scope == "auto_promote" and context.get("platform") == "eval"
 
 
 @dataclass(frozen=True)
@@ -142,6 +158,15 @@ class MemoryV2Baseline:
         self.store = self._provider.store
         self.index = self._provider.index
         self._pipeline_stats = {
+            "mutation_authority_policy": dict(_EVAL_MUTATION_POLICY),
+            "trusted_eval_operator_review": {
+                "authorized": False,
+                "considered_candidate_ids": [],
+                "promoted_candidate_ids": [],
+                "promoted_project_card_ids": [],
+                "blocked_candidate_ids": [],
+                "failed_candidate_ids": [],
+            },
             "user_events_archived": 0,
             "session_finalizations": 0,
             "extraction_considered_events": 0,
@@ -164,6 +189,8 @@ memory_v2:
     candidate_creation_enabled: true
   consolidation:
     enabled: true
+  auto_promote:
+    enabled: true
   prefetch:
     enabled: true
   working_memory:
@@ -176,7 +203,12 @@ memory_v2:
         from plugins.memory.memory_v2 import MemoryV2Provider
 
         provider = MemoryV2Provider()
-        provider.initialize(session_id, hermes_home=str(self.hermes_home), platform="eval")
+        provider.initialize(
+            session_id,
+            hermes_home=str(self.hermes_home),
+            platform="eval",
+            memory_v2_mutation_authorizer=_authorize_eval_auto_promote,
+        )
         return provider
 
     def restart(self) -> None:
@@ -264,15 +296,78 @@ memory_v2:
         assert self._provider is not None
         payload = json.loads(self._provider.handle_tool_call("memory_v2_consolidate", {}))
         self._pipeline_stats["consolidation_success"] = bool(payload.get("success"))
+        mutation_authorized = bool(payload.get("mutation_authorized"))
+        self._pipeline_stats["consolidation_mutation_authorized"] = mutation_authorized
         consolidation = dict(payload.get("consolidation") or payload)
         for key in ("considered", "promoted", "rejected", "archived_only", "skipped"):
             self._pipeline_stats[f"consolidation_{key}"] = int(consolidation.get(key) or 0)
+        self._pipeline_stats["trusted_eval_operator_review"] = (
+            self._run_trusted_eval_operator_review(authorized=mutation_authorized)
+        )
         self._pipeline_stats["post_consolidation_candidates"] = self.store.count_candidates()
         self._pipeline_stats["post_consolidation_memory_items"] = len(self.store.list_memory_items())
         self._pipeline_stats["post_consolidation_project_cards"] = len(self.store.list_project_cards())
 
     def pipeline_metrics(self) -> dict[str, Any]:
         return dict(self._pipeline_stats)
+
+    def _run_trusted_eval_operator_review(self, *, authorized: bool) -> dict[str, Any]:
+        """Promote only source-grounded project candidates under eval authority."""
+        telemetry: dict[str, Any] = {
+            "policy": "trusted_eval_operator_review",
+            "authorized": authorized,
+            "considered_candidate_ids": [],
+            "promoted_candidate_ids": [],
+            "promoted_project_card_ids": [],
+            "blocked_candidate_ids": [],
+            "failed_candidate_ids": [],
+            "candidate_fingerprints": {},
+        }
+        if not authorized:
+            return telemetry
+
+        candidate_ids = [
+            candidate.id
+            for candidate in self.store.list_candidates()
+            if candidate.gate_decision == GateDecision.PENDING
+            and candidate.type == MemoryType.PROJECT_STATE
+        ]
+        telemetry["considered_candidate_ids"] = list(candidate_ids)
+        operations = MemoryOperationService(self.store, self.index)
+        for candidate_id in candidate_ids:
+            candidate = next(
+                (
+                    item
+                    for item in self.store.list_candidates()
+                    if item.id == candidate_id
+                    and item.gate_decision == GateDecision.PENDING
+                ),
+                None,
+            )
+            if candidate is None:
+                telemetry["blocked_candidate_ids"].append(candidate_id)
+                continue
+            source_grounded = bool(candidate.source_refs) and all(
+                self.store.source_ref_exists(source_ref, index=self.index)
+                for source_ref in candidate.source_refs
+            )
+            if not source_grounded:
+                telemetry["blocked_candidate_ids"].append(candidate_id)
+                continue
+
+            fingerprint = candidate_fingerprint(candidate)
+            telemetry["candidate_fingerprints"][candidate_id] = fingerprint
+            result = operations.promote_candidate(
+                candidate_id,
+                actor="trusted_eval_operator_review",
+                expected_candidate_fingerprint=fingerprint,
+            )
+            if not result.success:
+                telemetry["failed_candidate_ids"].append(candidate_id)
+                continue
+            telemetry["promoted_candidate_ids"].append(candidate_id)
+            telemetry["promoted_project_card_ids"].extend(result.ids)
+        return telemetry
 
     def retrieve(self, query: EvalQuery) -> EvalResult:
         assert self._provider is not None

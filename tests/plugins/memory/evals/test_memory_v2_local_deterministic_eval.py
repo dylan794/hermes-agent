@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
+
+import yaml
 
 from plugins.memory.memory_v2.evals.baselines import MemoryV2Baseline, NoMemoryBaseline, RawFTSBaseline
 from plugins.memory.memory_v2.evals.datasets import EvalEvent, EvalQuery, load_eval_dataset
@@ -160,6 +163,119 @@ def test_memory_v2_baseline_promotes_preference_and_project_card(tmp_path):
     assert irrelevant.retrieved_count == 0
 
 
+def test_eval_project_cards_use_trusted_operator_review_with_fingerprints(tmp_path):
+    dataset = load_eval_dataset(FIXTURES / "local_memory_eval_v1.yaml")
+    baseline = MemoryV2Baseline(tmp_path / "memory_v2")
+    config = yaml.safe_load(
+        (baseline.hermes_home / "config.yaml").read_text(encoding="utf-8")
+    )
+
+    assert config["memory_v2"]["auto_promote"]["enabled"] is True
+
+    baseline.ingest(dataset.events)
+    assert baseline.store.list_project_cards() == []
+
+    baseline.consolidate()
+
+    cards = baseline.store.list_project_cards()
+    metrics = baseline.pipeline_metrics()
+    review = metrics["trusted_eval_operator_review"]
+    assert len(cards) == 1
+    assert cards[0].id == "project:memory-v2"
+    assert review["policy"] == "trusted_eval_operator_review"
+    assert review["authorized"] is True
+    assert review["considered_candidate_ids"] == ["cand_event_project_001"]
+    assert review["promoted_candidate_ids"] == ["cand_event_project_001"]
+    assert review["promoted_project_card_ids"] == ["project:memory-v2"]
+    assert len(review["candidate_fingerprints"]["cand_event_project_001"]) == 64
+    assert metrics["mutation_authority_policy"] == {
+        "authority_source": "eval_harness",
+        "authorized_scope": "auto_promote",
+        "required_platform": "eval",
+        "model_arguments_can_authorize": False,
+        "project_card_policy": "trusted_eval_operator_review",
+    }
+
+
+def test_eval_project_operator_review_requires_harness_callback(tmp_path, monkeypatch):
+    from plugins.memory.memory_v2.evals import baselines
+
+    monkeypatch.setattr(
+        baselines,
+        "_authorize_eval_auto_promote",
+        lambda scope, context: False,
+    )
+    dataset = load_eval_dataset(FIXTURES / "local_memory_eval_v1.yaml")
+    baseline = baselines.MemoryV2Baseline(tmp_path / "memory_v2")
+
+    baseline.ingest(dataset.events)
+    baseline.consolidate()
+
+    review = baseline.pipeline_metrics()["trusted_eval_operator_review"]
+    assert review["authorized"] is False
+    assert review["promoted_candidate_ids"] == []
+    assert baseline.store.list_project_cards() == []
+
+
+def test_eval_harness_authority_is_scope_and_platform_bound():
+    from plugins.memory.memory_v2.evals.baselines import _authorize_eval_auto_promote
+
+    assert _authorize_eval_auto_promote("auto_promote", {"platform": "eval"}) is True
+    assert _authorize_eval_auto_promote("review_apply", {"platform": "eval"}) is False
+    assert _authorize_eval_auto_promote("auto_promote", {"platform": "cli"}) is False
+
+
+def test_ordinary_provider_and_model_arguments_cannot_spoof_eval_authority(tmp_path):
+    from plugins.memory.memory_v2 import MemoryV2Provider
+
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "memory_v2": {
+                    "archive": {"capture_enabled": True},
+                    "extraction": {
+                        "enabled": True,
+                        "candidate_creation_enabled": True,
+                    },
+                    "consolidation": {"enabled": True},
+                    "auto_promote": {"enabled": True},
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    provider = MemoryV2Provider()
+    provider.initialize("ordinary-eval", hermes_home=str(tmp_path), platform="eval")
+    provider.sync_turn(
+        "Remember that Project Memory v2 next action: preserve the safety contract.",
+        "Queued.",
+        session_id="ordinary-eval",
+        event_id="event_model_spoof",
+    )
+    provider.handle_tool_call(
+        "memory_v2_extract_candidates",
+        {"session_id": "ordinary-eval"},
+    )
+
+    payload = json.loads(
+        provider.handle_tool_call(
+            "memory_v2_consolidate",
+            {
+                "authorize_mutation": True,
+                "memory_v2_mutation_authorizer": True,
+                "platform": "eval",
+                "scope": "auto_promote",
+            },
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["mutation_authorized"] is False
+    assert provider.store.list_project_cards() == []
+    assert provider.store.list_candidates()[0].gate_decision.value == "pending"
+
+
 def test_run_eval_scores_multiple_baselines(tmp_path):
     dataset = load_eval_dataset(FIXTURES / "local_memory_eval_v1.yaml")
 
@@ -183,6 +299,9 @@ def test_run_eval_does_not_penalize_correct_no_retrieve_rows_for_answer_text(tmp
 
 def test_memory_v2_project_fixture_beats_raw_fts_on_current_status(tmp_path):
     dataset = load_eval_dataset(FIXTURES / "local_memory_eval_project_v1.yaml")
+    assert dataset.metadata["mutation_authority_policy"]["project_card_policy"] == (
+        "trusted_eval_operator_review"
+    )
     report = run_eval(
         dataset,
         baselines=[RawFTSBaseline(tmp_path / "raw.sqlite"), MemoryV2Baseline(tmp_path / "memory_v2")],
@@ -410,7 +529,14 @@ def test_memory_v2_baseline_packet_equals_direct_provider_prefetch_for_same_stat
     (direct_home / "config.yaml").parent.mkdir(parents=True, exist_ok=True)
     (direct_home / "config.yaml").write_text((baseline.hermes_home / "config.yaml").read_text(encoding="utf-8"), encoding="utf-8")
     direct = MemoryV2Provider()
-    direct.initialize("session-direct", hermes_home=str(direct_home), platform="eval")
+    direct.initialize(
+        "session-direct",
+        hermes_home=str(direct_home),
+        platform="eval",
+        memory_v2_mutation_authorizer=lambda scope, context: (
+            scope == "auto_promote" and context["platform"] == "eval"
+        ),
+    )
     direct.sync_turn(
         events[0].text,
         "Synthetic eval assistant acknowledgement.",
@@ -451,7 +577,9 @@ def test_memory_v2_baseline_uses_provider_lifecycle_not_eval_store_shortcut(tmp_
     baseline.consolidate()
     result = baseline.retrieve(query)
 
-    assert "working_open_loops" in result.memory_packet
+    assert baseline.store.list_open_loops() == []
+    assert baseline.store.list_candidates()[0].gate_decision.value == "pending"
+    assert "cand_event_open_loop_provider" in result.memory_packet
     assert "event_open_loop_provider" in result.memory_packet
     assert "follow up on Memory v2 provider lifecycle tomorrow" in result.memory_packet
 
