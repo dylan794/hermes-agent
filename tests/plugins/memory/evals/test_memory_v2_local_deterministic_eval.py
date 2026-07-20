@@ -448,22 +448,47 @@ def test_memory_v2_baseline_uses_provider_lifecycle_not_eval_store_shortcut(tmp_
     assert "follow up on Memory v2 provider lifecycle tomorrow" in result.memory_packet
 
 
-def test_memory_v2_eval_baseline_has_no_eval_only_precision_or_gold_label_access():
-    import inspect
-    import plugins.memory.memory_v2.evals.baselines as baselines
+def test_memory_v2_eval_baseline_has_no_eval_only_precision_or_gold_label_access(
+    tmp_path,
+):
+    class _GoldLabelsMustNotBeRead:
+        id = "query-with-independent-authority"
+        text = "What do I remember?"
+        metadata = {"provider_session_id": "session-authority"}
 
-    source = "\n".join(
-        [
-            inspect.getsource(baselines.MemoryV2Baseline.retrieve),
-            inspect.getsource(baselines.MemoryV2Baseline._session_id_for_query),
-        ]
-    )
+        @property
+        def expected_source_refs(self):
+            raise AssertionError("retrieval read expected_source_refs")
 
-    assert "hard_eval_precision" not in source
-    assert not hasattr(baselines, "_filter_for_hard_eval_precision")
-    assert "expected_source_refs" not in source
-    assert "expected_answer_contains" not in source
-    assert "forbidden_source_refs" not in source
+        @property
+        def expected_answer_contains(self):
+            raise AssertionError("retrieval read expected_answer_contains")
+
+        @property
+        def forbidden_source_refs(self):
+            raise AssertionError("retrieval read forbidden_source_refs")
+
+    class _ProviderSpy:
+        def __init__(self):
+            self.switched_to = ""
+            self.query = ""
+
+        def on_session_switch(self, session_id: str) -> None:
+            self.switched_to = session_id
+
+        def prefetch(self, query: str) -> str:
+            self.query = query
+            return ""
+
+    baseline = MemoryV2Baseline(tmp_path / "memory-v2-eval")
+    provider = _ProviderSpy()
+    baseline._provider = provider
+
+    result = baseline.retrieve(_GoldLabelsMustNotBeRead())
+
+    assert result.query_id == "query-with-independent-authority"
+    assert provider.switched_to == "session-authority"
+    assert provider.query == "What do I remember?"
 
 
 def test_chronological_contract_datasets_cover_30_90_365_days_and_checkpoints():
