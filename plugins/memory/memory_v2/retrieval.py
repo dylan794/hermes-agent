@@ -14,6 +14,9 @@ from .index import MemoryV2Index
 from .schemas import MemoryPacket
 
 
+PREFETCH_BUDGET_WARNING = "Memory v2 packet truncated to fit prefetch budget."
+
+
 @dataclass(frozen=True)
 class TemporalIntent:
     """Low-compute temporal interpretation for a memory query."""
@@ -662,6 +665,10 @@ class MemoryPacketComposer:
             and MemoryPacketComposer._estimate_tokens(rendered) > packet.token_budget
         ):
             compact_payload = dict(payload)
+            compact_warnings = list(packet.warnings)
+            if PREFETCH_BUDGET_WARNING not in compact_warnings:
+                compact_warnings.append(PREFETCH_BUDGET_WARNING)
+            compact_payload["warnings"] = compact_warnings
             compact_payload["items"] = [
                 MemoryPacketComposer._minimum_useful_item(item)
                 for item in packet.items
@@ -675,7 +682,44 @@ class MemoryPacketComposer:
             )
             if MemoryPacketComposer._estimate_tokens(rendered) > packet.token_budget:
                 compact_payload["sections"] = {}
-                compact_payload.pop("warnings", None)
+                rendered = yaml.safe_dump(
+                    compact_payload, sort_keys=False, allow_unicode=True
+                )
+            while (
+                MemoryPacketComposer._estimate_tokens(rendered) > packet.token_budget
+                and len(compact_payload["items"]) > 1
+            ):
+                compact_payload["items"].pop()
+                rendered = yaml.safe_dump(
+                    compact_payload, sort_keys=False, allow_unicode=True
+                )
+            if (
+                MemoryPacketComposer._estimate_tokens(rendered) > packet.token_budget
+                and compact_payload["items"]
+            ):
+                compact_payload["items"] = [
+                    MemoryPacketComposer._route_critical_budget_item(packet.items[0])
+                ]
+                rendered = yaml.safe_dump(
+                    compact_payload, sort_keys=False, allow_unicode=True
+                )
+            if (
+                MemoryPacketComposer._estimate_tokens(rendered) > packet.token_budget
+                and compact_payload["items"]
+            ):
+                first_item = packet.items[0]
+                compact_payload["items"] = [
+                    {
+                        "id": first_item.get("id", ""),
+                        "type": first_item.get("type", ""),
+                        "truncated": True,
+                    }
+                ]
+                rendered = yaml.safe_dump(
+                    compact_payload, sort_keys=False, allow_unicode=True
+                )
+            if MemoryPacketComposer._estimate_tokens(rendered) > packet.token_budget:
+                compact_payload["items"] = []
                 rendered = yaml.safe_dump(
                     compact_payload, sort_keys=False, allow_unicode=True
                 )
@@ -1570,6 +1614,50 @@ class MemoryPacketComposer:
                         MemoryPacketComposer._truncate(values[0], 160)
                     ]
             compact["project"] = minimal_project
+        return {key: value for key, value in compact.items() if value not in ("", [], None)}
+
+    @staticmethod
+    def _route_critical_budget_item(item: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep one useful routed field when the normal compact item cannot fit."""
+        compact: Dict[str, Any] = {
+            "id": item.get("id", ""),
+            "type": item.get("type", ""),
+            "status": item.get("status", ""),
+            "truncated": True,
+        }
+        source_refs = list(item.get("source_refs") or [])
+        if source_refs:
+            compact["source_refs"] = source_refs[:1]
+        project = dict(item.get("project") or {})
+        if project:
+            minimal_project: Dict[str, Any] = {}
+            if project.get("name"):
+                minimal_project["name"] = MemoryPacketComposer._truncate(
+                    project["name"], 60
+                )
+            for field_name in (
+                "current_state",
+                "next_actions",
+                "goal",
+                "decisions",
+                "open_questions",
+                "why_it_matters",
+            ):
+                values = MemoryPacketComposer._project_list(project.get(field_name))
+                if not values:
+                    continue
+                value = MemoryPacketComposer._truncate(values[0], 80)
+                minimal_project[field_name] = (
+                    [value]
+                    if field_name in {"next_actions", "decisions", "open_questions"}
+                    else value
+                )
+                break
+            compact["project"] = minimal_project
+        elif item.get("summary"):
+            compact["summary"] = MemoryPacketComposer._truncate(
+                item["summary"], 80
+            )
         return {key: value for key, value in compact.items() if value not in ("", [], None)}
 
     def _bounded_items(

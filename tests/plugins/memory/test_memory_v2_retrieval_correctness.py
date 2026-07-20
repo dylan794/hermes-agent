@@ -12,6 +12,7 @@ from plugins.memory.memory_v2.schemas import (
     CandidateMemory,
     GateDecision,
     MemoryItem,
+    MemoryPacket,
     ProjectCard,
     SourceRef,
 )
@@ -70,6 +71,43 @@ def test_project_packet_keeps_a_useful_result_without_section_duplication(
     if source_count > 8:
         assert packet.items[0]["source_ref_count"] == source_count
         assert packet.items[0]["source_refs_truncated"] is True
+
+
+def test_packet_budget_fallback_warns_and_keeps_route_critical_project_field():
+    packet = MemoryPacket(
+        route="project_continuity",
+        confidence="high",
+        token_budget=160,
+        items=[
+            {
+                "id": "project:budget-atlas",
+                "type": "project_state",
+                "status": "active",
+                "summary": "x" * 5000,
+                "source_refs": [f"source_{index}" for index in range(100)],
+                "project": {
+                    "name": "Budget Atlas",
+                    "current_state": "Current packet state " + "x" * 1000,
+                    "next_actions": ["Preserve the route-critical fallback."],
+                },
+            }
+        ],
+        sections={
+            "active_project_state": [
+                {"item_ref": "project:budget-atlas", "details": "x" * 5000}
+            ]
+        },
+        retrieval_plan={"route": "project_continuity"},
+    )
+
+    rendered = MemoryPacketComposer.render(packet)
+    parsed = yaml.safe_load(rendered)
+
+    assert MemoryPacketComposer._estimate_tokens(rendered) <= packet.token_budget
+    assert "truncated to fit prefetch budget" in rendered
+    assert parsed["items"][0]["id"] == "project:budget-atlas"
+    assert parsed["items"][0]["source_refs"] == ["source_0"]
+    assert parsed["items"][0]["project"]["current_state"]
 
 
 def test_candidates_are_route_compatible_and_promoted_successors_hide_them(tmp_path):

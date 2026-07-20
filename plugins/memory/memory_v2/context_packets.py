@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Sequence
 import yaml
 
 from .redaction import redact_text
-from .retrieval import MemoryPacketComposer
+from .retrieval import MemoryPacketComposer, PREFETCH_BUDGET_WARNING
 from .schemas import MemoryPacket
 
 
@@ -173,9 +173,8 @@ def render_dynamic_memory_packet(
     # the whole point of the packet is evidence-backed recall.
     for max_chars in (120, 80, 48, 24, 0):
         compact_warnings = list(packet.warnings)
-        truncation_warning = "Memory v2 packet truncated to fit prefetch budget."
-        if truncation_warning not in compact_warnings:
-            compact_warnings.append(truncation_warning)
+        if PREFETCH_BUDGET_WARNING not in compact_warnings:
+            compact_warnings.append(PREFETCH_BUDGET_WARNING)
         compact_packet = MemoryPacket(
             route=packet.route,
             confidence=packet.confidence,
@@ -195,7 +194,7 @@ def render_dynamic_memory_packet(
         confidence="low",
         token_budget=packet.token_budget,
         items=[{"id": item.get("id", ""), "truncated": True} for item in packet.items],
-        warnings=["memory_packet_truncated_to_fit_budget"],
+        warnings=[PREFETCH_BUDGET_WARNING],
         sections={},
         retrieval_plan={"route": packet.route, "truncated": True},
     )
