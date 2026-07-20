@@ -6,12 +6,12 @@ Phase 10 rollout gates do not drift silently.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CHECKLIST = REPO_ROOT / "docs" / "memory-v2-archive-release-checklist.md"
+STAGE8 = REPO_ROOT / "docs" / "memory-v2-stage-8-canary.md"
 README = REPO_ROOT / "plugins" / "memory" / "memory_v2" / "README.md"
 
 
@@ -28,26 +28,13 @@ REQUIRED_STAGES = [
 ]
 
 
-REQUIRED_FLAGS = {
-    "memory_v2.archive.enabled": "true",
-    "memory_v2.archive.backfill_enabled": "false",
-    "memory_v2.archive.search_tools_enabled": "false",
-    "memory_v2.archive.show_tools_enabled": "false",
-    "memory_v2.archive.include_tool_outputs": "false",
-    "memory_v2.extraction.enabled": "false",
-    "memory_v2.extraction.candidate_creation_enabled": "false",
-    "memory_v2.consolidation.enabled": "false",
-    "memory_v2.prefetch.enabled": "false",
-    "memory_v2.auto_promote.enabled": "false",
-}
-
-
 REQUIRED_GATE_COMMANDS = [
     "./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_*.py tests/plugins/memory/evals tests/agent/test_memory_provider.py",
     "./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_raw_archive_perf.py -q",
     "./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_adversarial_archive.py -q",
     "./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_archive_readiness.py -q",
     "./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_extraction_rollout.py -q",
+    "python scripts/memory_v2_stage8_canary.py",
     "python scripts/memory_v2_privacy_scan.py --mode memory-v2-release-artifacts --format json",
     "python scripts/memory_v2_privacy_scan.py --mode intentional-adversarial-fixtures --format json",
     "python scripts/memory_v2_eval.py --dataset plugins/memory/memory_v2/evals/fixtures/local_memory_eval_v1.yaml --baseline no_memory --baseline raw_fts --baseline memory_v2",
@@ -78,12 +65,13 @@ def test_release_checklist_documents_all_rollout_stages() -> None:
         assert stage in text
 
 
-def test_release_checklist_documents_default_rollout_flags() -> None:
+def test_release_checklist_delegates_to_one_authoritative_stage8_matrix() -> None:
     text = _checklist_text()
 
-    for flag, expected in REQUIRED_FLAGS.items():
-        pattern = rf"`?{re.escape(flag)}`?\s*\|\s*`?{expected}`?\b"
-        assert re.search(pattern, text), f"missing default for {flag}={expected}"
+    assert "memory-v2-stage-8-canary.md" in text
+    assert "single authoritative stage-specific feature-flag matrix" in text
+    assert "| `memory_v2.archive.enabled` |" not in text
+    assert STAGE8.exists()
 
 
 def test_release_checklist_documents_release_gate_commands() -> None:
@@ -109,3 +97,4 @@ def test_memory_v2_readme_links_phase_10_runbook() -> None:
     assert "docs/memory-v2-archive-release-checklist.md" in text
     assert "Phase 10" in text
     assert "rollout gate" in text.lower()
+    assert "docs/memory-v2-stage-8-canary.md" in text

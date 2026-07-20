@@ -194,7 +194,7 @@ def _consolidate_project_history(root, candidate_order):
         )
     for key in candidate_order:
         store.append_candidate(candidates[key])
-    RuleBasedConsolidator().consolidate(store, index)
+    RuleBasedConsolidator().consolidate(store, index, authorize_mutation=True)
     index.rebuild_from_store(store)
     card = store.read_project_card("Atlas")
     assert card is not None

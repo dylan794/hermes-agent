@@ -61,6 +61,7 @@ Each stage must be explicitly signed off before moving to the next. If a gate fa
 8. Limited automatic prefetch
    - Scope: routed, bounded Memory v2 packets for a small allowlisted profile/session set.
    - Required proof: token budget, latency budget, irrelevant suppression, privacy leakage, and adversarial instruction-following gates pass.
+   - Executable gate: the isolated verifier in [`memory-v2-stage-8-canary.md`](memory-v2-stage-8-canary.md) must exit zero with `"go":true`; run `python scripts/memory_v2_stage8_canary.py`.
    - Mutations: none from prefetch.
 
 9. Broader release
@@ -68,52 +69,9 @@ Each stage must be explicitly signed off before moving to the next. If a gate fa
    - Required proof: full release checklist complete, branch/release artifacts contain no private data, known caveats documented.
    - Mutations: only those allowed by the deployed feature flags and review policy.
 
-## Default rollout feature flags
+## Rollout feature flags
 
-These are the desired Phase 10 defaults for a safe initial rollout. Keep mutating and autonomous behavior off by default.
-
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `memory_v2.archive.enabled` | `true` | Allow the archive subsystem to exist for synthetic/dogfood/read-only gates. |
-| `memory_v2.archive.backfill_enabled` | `false` | Keep SessionDB import disabled until dry-run and confirmation gates pass. |
-| `memory_v2.archive.capture_enabled` | `false` | Keep automatic conversation capture disabled until an operator opts in. |
-| `memory_v2.archive.search_tools_enabled` | `false` | Keep private archive search hidden until the read-only rollout stage. |
-| `memory_v2.archive.show_tools_enabled` | `false` | Keep private archive source display hidden until the read-only rollout stage. |
-| `memory_v2.archive.prefetch_raw_enabled` | `false` | Keep raw archive hydration out of automatic prefetch by default. |
-| `memory_v2.archive.include_tool_outputs` | `false` | Exclude tool output from import until separate privacy/poisoning review. |
-| `memory_v2.extraction.enabled` | `false` | Keep offline candidate extraction disabled until Step 6 is explicitly gated. |
-| `memory_v2.extraction.candidate_creation_enabled` | `false` | Candidate creation from archive evidence must be an explicit opt-in and pending-only. |
-| `memory_v2.extraction.small_model_enabled` | `false` | Optional structured model extraction requires this flag plus an explicitly supplied adapter; validated output remains pending-only. |
-| `memory_v2.consolidation.enabled` | `false` | Disable automatic consolidation/promotion for initial rollout. |
-| `memory_v2.prefetch.enabled` | `false` | Disable automatic online memory injection until late-stage gated rollout. |
-| `memory_v2.review_apply.enabled` | `false` | Keep model-visible review rejection actions disabled by default. |
-| `memory_v2.auto_promote.enabled` | `false` | Never automatically promote semantic memory in the initial release. |
-
-Equivalent YAML shape:
-
-```yaml
-memory_v2:
-  archive:
-    enabled: true
-    capture_enabled: false
-    backfill_enabled: false
-    search_tools_enabled: false
-    show_tools_enabled: false
-    prefetch_raw_enabled: false
-    include_tool_outputs: false
-  extraction:
-    enabled: false
-    candidate_creation_enabled: false
-    small_model_enabled: false
-  consolidation:
-    enabled: false
-  prefetch:
-    enabled: false
-  review_apply:
-    enabled: false
-  auto_promote:
-    enabled: false
-```
+[`memory-v2-stage-8-canary.md`](memory-v2-stage-8-canary.md) is the single authoritative stage-specific feature-flag matrix. It is checked against both runtime defaults and the parsed isolated-canary example. Do not copy the canary values into a live profile.
 
 ## Release gate commands
 
@@ -125,6 +83,7 @@ Run these from the repository root after activating the local virtualenv. They a
 ./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_adversarial_archive.py -q
 ./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_archive_readiness.py -q
 ./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_extraction_rollout.py -q
+python scripts/memory_v2_stage8_canary.py
 python scripts/memory_v2_privacy_scan.py --mode memory-v2-release-artifacts --format json
 python scripts/memory_v2_privacy_scan.py --mode intentional-adversarial-fixtures --format json
 python scripts/memory_v2_eval.py --dataset plugins/memory/memory_v2/evals/fixtures/local_memory_eval_v1.yaml --baseline no_memory --baseline raw_fts --baseline memory_v2

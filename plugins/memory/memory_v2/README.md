@@ -12,6 +12,8 @@ The goal is not to stuff more chat history into the model context. The goal is t
 
 Memory v2 is a research/prototype memory provider. It is fail-closed and should not be treated as a finished memory system. The [P0 hardening status](../../../docs/memory-v2-p0-status.md) is the source of truth for current guarantees, disabled defaults, benchmark limitations, and verification commands. [P1 candidate-only extraction](../../../docs/memory-v2-p1-extraction.md) documents typed claims, exact evidence spans, assistant-authority boundaries, and the optional structured-model adapter. In particular, the 30/90/365-day benchmark contracts are not currently passing claims.
 
+The [Phase 10 archive release checklist](../../../docs/memory-v2-archive-release-checklist.md) defines the overall rollout gate. The [Stage 8 isolated canary](../../../docs/memory-v2-stage-8-canary.md) is the authoritative Stage 8 feature-flag matrix, deterministic verification command, go/no-go contract, and rollback procedure.
+
 Current strengths:
 
 - local profile-scoped storage;

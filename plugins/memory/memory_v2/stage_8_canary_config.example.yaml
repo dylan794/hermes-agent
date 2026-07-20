@@ -1,0 +1,30 @@
+# Synthetic, isolated Stage 8 canary only. The verifier copies this file into a
+# fresh temporary Hermes home; do not merge it into a personal profile.
+memory:
+  provider: memory_v2
+memory_v2:
+  archive:
+    enabled: true
+    capture_enabled: true
+    backfill_enabled: false
+    search_tools_enabled: true
+    show_tools_enabled: true
+    prefetch_raw_enabled: false
+    include_tool_outputs: false
+  extraction:
+    enabled: true
+    candidate_creation_enabled: true
+    small_model_enabled: false
+  consolidation:
+    enabled: true
+  prefetch:
+    enabled: true
+  review_apply:
+    enabled: false
+  auto_promote:
+    enabled: false
+  contradictions:
+    auto_supersede: false
+    create_candidates: false
+  working_memory:
+    enabled: false
