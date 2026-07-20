@@ -43,17 +43,24 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # pytest, pytest-asyncio, pytest-timeout, ruff, ty).
 VENV=""
 for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agent/venv"; do
-  if [ -f "$candidate/bin/activate" ]; then
+  candidate_python="$candidate/bin/python"
+  if [ ! -f "$candidate/bin/activate" ] || [ ! -x "$candidate_python" ]; then
+    continue
+  fi
+
+  if "$candidate_python" -m pytest --version >/dev/null 2>&1; then
     VENV="$candidate"
     break
   fi
+
+  echo "▶ skipping unusable test virtualenv (pytest preflight failed): $candidate" >&2
 done
 
 if [ -n "$VENV" ]; then
   PYTHON="$VENV/bin/python"
 elif [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
-    && "$HERMES_PYTHON" -c 'import pytest' 2>/dev/null; then
-  # Guard with an import check: HERMES_PYTHON may point at the RELEASE
+    && "$HERMES_PYTHON" -m pytest --version >/dev/null 2>&1; then
+  # Guard with the same pytest startup preflight: HERMES_PYTHON may point at the RELEASE
   # venv (no pytest) when inherited from a wrapped `hermes` binary rather
   # than the devShell hook.
   PYTHON="$HERMES_PYTHON"
