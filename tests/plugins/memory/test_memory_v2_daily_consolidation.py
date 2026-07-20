@@ -22,7 +22,7 @@ def _new_provider(tmp_path):
     return provider
 
 
-def test_daily_consolidation_report_promotes_pending_candidates_and_writes_report_files(tmp_path):
+def test_authorized_daily_consolidation_promotes_and_writes_report_files(tmp_path):
     provider = _new_provider(tmp_path)
     provider.sync_turn("Remember that Alex prefers daily memory reports with concrete IDs.", "Queued.")
     provider.sync_turn("Remember to follow up on Memory v2 report UX tomorrow.", "Tracked.")
@@ -32,6 +32,7 @@ def test_daily_consolidation_report_promotes_pending_candidates_and_writes_repor
         provider.index,
         date="2026-06-01",
         allow_consolidation=True,
+        authorize_mutation=True,
     )
 
     report_path = tmp_path / "memory_v2" / report["report_path"]
@@ -59,7 +60,7 @@ def test_daily_consolidation_report_promotes_pending_candidates_and_writes_repor
     assert "consolidate_candidate_to_open_loop" in operation_types
 
 
-def test_daily_report_provider_tool_is_exposed_and_returns_json(tmp_path):
+def test_daily_report_provider_tool_is_exposed_and_report_only_without_authority(tmp_path):
     provider = _new_provider(tmp_path)
     provider.sync_turn("Remember that Alex prefers report commands to be auditable.", "Queued.")
 
@@ -69,7 +70,8 @@ def test_daily_report_provider_tool_is_exposed_and_returns_json(tmp_path):
     assert "memory_v2_daily_report" in schemas
     assert result["success"] is True
     assert result["date"] == "2026-06-02"
-    assert result["after_counts"]["pending_candidates"] == 0
+    assert result["after_counts"]["pending_candidates"] == 1
+    assert result["consolidation"]["mutation_authorized"] is False
     assert (tmp_path / "memory_v2" / result["report_path"]).is_file()
 
 
@@ -100,7 +102,8 @@ def test_daily_consolidation_module_cli_runs_against_profile_home(tmp_path):
     assert completed.stderr == ""
     assert payload["success"] is True
     assert payload["date"] == "2026-06-03"
-    assert payload["after_counts"]["pending_candidates"] == 0
+    assert payload["after_counts"]["pending_candidates"] == 1
+    assert payload["consolidation"]["mutation_authorized"] is False
     assert (tmp_path / "memory_v2" / payload["report_path"]).is_file()
 
 
@@ -127,5 +130,5 @@ def test_daily_consolidation_cli_updates_provider_index_path(tmp_path):
 
     assert completed.returncode == 0
     results = reloaded.index.search("daily reports stay unified", route="preference_recall", limit=5)
-    assert results[0]["type"] == "preference"
-    assert results[0]["status"] == "active"
+    assert results[0]["type"] == "candidate"
+    assert results[0]["status"] == "pending"

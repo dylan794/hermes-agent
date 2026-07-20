@@ -11,18 +11,19 @@ Date: 2026-07-11
 - Full Hermes turn trajectories may be passed to `sync_turn(messages=...)`. Tool results are redacted, bounded, deduplicated, archived as canonical raw evidence, and represented only as pending episode candidates.
 - Provider-owned session state is authoritative. Caller-supplied `session_id` values do not widen raw access or change captured provenance.
 - Promotion grounding requires canonical raw evidence, an existing durable memory record, or an existing artifact record. A writable source-reference sidecar alone is not canonical evidence.
-- Direct promote/reject tools require a fresh review-plan ID, candidate fingerprint, and exact confirmation token. Forced promotion is rejected. Direct open-loop mutation is hidden until it has an equivalent review-plan contract. Contradiction auto-supersession is disabled; it may create review candidates only.
+- Model-facing promotion is unavailable even if the model copies a review-plan token; promotion requires the non-model operator boundary. Model-facing rejection remains review-plan and fingerprint bound. Forced promotion is rejected. Direct open-loop mutation is hidden until it has an equivalent review-plan contract. Contradiction auto-supersession is disabled; it may create review candidates only.
 - Durable review mutations use a cross-process profile lock and a prepared/committed journal. A failure after canonical mutation begins leaves `recovery_required`, blocks later mutations, and is not auto-repaired.
 - Recalled memory is wrapped as untrusted context/evidence, not as authoritative instructions.
 
 ## Fail-closed defaults
 
-These remain disabled unless explicitly configured:
+The archive container exists by default, but capture and every private or
+mutating surface remain disabled unless explicitly configured:
 
 ```yaml
 memory_v2:
   archive:
-    enabled: false
+    enabled: true
     capture_enabled: false
     search_tools_enabled: false
     show_tools_enabled: false
@@ -37,6 +38,8 @@ memory_v2:
   prefetch:
     enabled: false
   review_apply:
+    enabled: false
+  auto_promote:
     enabled: false
 ```
 
@@ -63,7 +66,7 @@ Exact node IDs live in `tests/plugins/memory/conftest.py`. New failures are not 
 ## Verification commands
 
 ```bash
-venv/bin/python -m pytest tests/plugins/memory/test_memory_v2_*.py \
+./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_*.py \
   tests/plugins/memory/evals \
   tests/agent/test_memory_v2_conversation_loop_session_prefetch.py \
   tests/agent/test_memory_provider.py -q

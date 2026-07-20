@@ -175,10 +175,13 @@ def test_model_mutation_tools_are_review_bound_and_unplanned_paths_are_hidden(tm
 
     schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
     assert "memory_v2_resolve_open_loop" not in schemas
-    for name in ("memory_v2_promote", "memory_v2_reject"):
-        required = set(schemas[name]["parameters"]["required"])
-        assert {"plan_id", "action_id", "candidate_fingerprint", "confirm"} <= required
-    assert "force" not in schemas["memory_v2_promote"]["parameters"]["properties"]
+    assert "memory_v2_promote" not in schemas
+    required = set(schemas["memory_v2_reject"]["parameters"]["required"])
+    assert {"plan_id", "action_id", "candidate_fingerprint", "confirm"} <= required
+
+    promote = json.loads(provider.handle_tool_call("memory_v2_promote", {"candidate_id": "x"}))
+    assert promote["success"] is False
+    assert "external operator authority" in promote["error"]
 
     payload = json.loads(provider.handle_tool_call("memory_v2_resolve_open_loop", {"loop_id": "x", "status": "resolved"}))
     assert payload["success"] is False

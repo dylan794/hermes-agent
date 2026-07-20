@@ -317,9 +317,11 @@ Use this to review what the write gate captured before promotion.
 
 ### `memory_v2_promote`
 
-Manually promotes one pending candidate after source validation.
+This operation is intentionally not model-callable. An external operator may
+promote one pending candidate through `MemoryOperationService` after source and
+full candidate-fingerprint validation under the profile lock.
 
-This is intentionally explicit. Promotion should mean “we are comfortable treating this as durable memory.”
+Copying a review-plan confirmation string does not confer promotion authority.
 
 ### `memory_v2_reject`
 
@@ -333,13 +335,20 @@ This is one of the most important tools. Source lookup is how Memory v2 avoids t
 
 ### `memory_v2_consolidate`
 
-Runs rule-based promotion/consolidation over pending candidates.
+Reports what rule-based consolidation would consider. Canonical mutations occur
+only when `memory_v2.auto_promote.enabled=true` and the trusted host supplies a
+separate `memory_v2_mutation_authorizer` callback that approves `auto_promote`.
+Even then, automatic promotion is limited to the review queue's
+`probably_promotable` lane; adversarial, contradictory, low-confidence,
+ephemeral, project-state, procedure, and episodic candidates remain pending.
 
 This is conservative and local. It should not promote every candidate.
 
 ### `memory_v2_daily_report`
 
-Runs daily consolidation and writes an auditable daily report/episode.
+Writes an auditable daily report/episode. It is report-only unless the same
+auto-promotion flag and external host authorization both permit mutation; it
+does not implicitly run candidate extraction.
 
 ### `memory_v2_dream_cycle`
 
@@ -359,7 +368,9 @@ python -m plugins.memory.memory_v2.dream --hermes-home ~/.hermes --auto-apply of
 
 Builds a contradiction/supersession dashboard.
 
-By default this does not mutate memories. It can optionally create review candidates. With `auto_supersede=true`, it may mutate only when strict gates pass.
+This does not supersede canonical memories automatically. It may optionally
+create review candidates, but supersession remains an explicit reviewed
+operation even if `auto_supersede=true` is present in legacy configuration.
 
 ### `memory_v2_resolve_open_loop`
 
@@ -373,7 +384,7 @@ Memory v2 does not assume the newest thing is automatically true. Contradictions
 
 The contradiction dashboard compares active memories and reports likely conflicts. It can produce candidate actions such as “memory B appears to supersede memory A.”
 
-Automatic supersession is deliberately narrow. It requires, at minimum:
+Any future automatic supersession policy would require, at minimum:
 
 - same memory type, subject, and predicate;
 - classification as a true contradiction or preference update;
@@ -384,7 +395,9 @@ Automatic supersession is deliberately narrow. It requires, at minimum:
 - explicit correction/update wording in the newer source evidence;
 - no scoped-preference wording that implies both facts may be valid in different contexts.
 
-When it does supersede, it marks the old memory as `superseded`, writes `superseded_by`, adds audit fields/tags, and records the relationship on the newer memory.
+An explicitly reviewed supersession marks the old memory as `superseded`, writes
+`superseded_by`, adds audit fields/tags, and records the relationship on the
+newer memory.
 
 This is opt-in because automatic memory mutation is a high-trust operation.
 
@@ -442,7 +455,7 @@ It scores:
 Run the local eval tests:
 
 ```bash
-python -m pytest tests/plugins/memory/evals -q
+./scripts/run_tests.sh tests/plugins/memory/evals -q
 ```
 
 Run the eval CLI against a fixture:
@@ -465,10 +478,10 @@ python -m ruff check plugins/memory/memory_v2 tests/plugins/memory scripts/memor
 Useful individual suites:
 
 ```bash
-python -m pytest tests/plugins/memory/test_memory_v2_provider.py -q
-python -m pytest tests/plugins/memory/test_memory_v2_retrieval.py -q
-python -m pytest tests/plugins/memory/test_memory_v2_consolidation.py -q
-python -m pytest tests/plugins/memory/evals -q
+./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_provider.py -q
+./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_retrieval.py -q
+./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_consolidation.py -q
+./scripts/run_tests.sh tests/plugins/memory/evals -q
 ```
 
 For public-release hygiene, also scan tracked and untracked Memory v2 files for private/local context before publishing:

@@ -41,6 +41,8 @@ class ConsolidationReport:
     rejected: int = 0
     archived_only: int = 0
     superseded: int = 0
+    skipped: int = 0
+    mutation_authorized: bool = False
     promoted_ids: List[str] = field(default_factory=list)
     rejected_ids: List[str] = field(default_factory=list)
     archived_ids: List[str] = field(default_factory=list)
@@ -57,6 +59,8 @@ class ConsolidationReport:
             "rejected": self.rejected,
             "archived_only": self.archived_only,
             "superseded": self.superseded,
+            "skipped": self.skipped,
+            "mutation_authorized": self.mutation_authorized,
             "promoted_ids": promoted_ids,
             "rejected_ids": rejected_ids,
             "archived_ids": archived_ids,
@@ -84,8 +88,25 @@ class RuleBasedConsolidator:
     later richer consolidation can audit or improve the canonical records.
     """
 
-    def consolidate(self, store: MemoryV2Store, index: MemoryV2Index) -> ConsolidationReport:
-        """Run consolidation under the profile lock and recovery journal."""
+    def consolidate(
+        self,
+        store: MemoryV2Store,
+        index: MemoryV2Index,
+        *,
+        authorize_mutation: bool = False,
+        safe_auto_only: bool = False,
+    ) -> ConsolidationReport:
+        """Run an authorized pass, or return a non-mutating pending-candidate report."""
+        if not authorize_mutation:
+            pending = sum(
+                candidate.gate_decision == GateDecision.PENDING
+                for candidate in store.list_candidates()
+            )
+            return ConsolidationReport(
+                considered=pending,
+                skipped=pending,
+                mutation_authorized=False,
+            )
         # Local import avoids the module cycle: operations imports this class's
         # deterministic conversion helpers for manual promotion.
         from .operations import MemoryOperationService
@@ -99,6 +120,16 @@ class RuleBasedConsolidator:
                     "interrupted operation blocks canonical mutation: "
                     f"{interrupted[0]['operation_id']}"
                 )
+            eligible_candidate_ids: set[str] | None = None
+            if safe_auto_only:
+                from .review import MemoryReviewQueue
+
+                queue = MemoryReviewQueue(store).build(limit=500)
+                eligible_candidate_ids = {
+                    str(item["id"])
+                    for item in queue.get("items") or []
+                    if item.get("review_lane") == "probably_promotable"
+                }
             store.append_operation_record(
                 {
                     "operation_id": operation_id,
@@ -110,7 +141,12 @@ class RuleBasedConsolidator:
                 }
             )
             try:
-                report = self._consolidate_locked(store, index)
+                report = self._consolidate_locked(
+                    store,
+                    index,
+                    eligible_candidate_ids=eligible_candidate_ids,
+                )
+                report.mutation_authorized = True
             except Exception as exc:
                 store.append_operation_record(
                     {
@@ -137,7 +173,13 @@ class RuleBasedConsolidator:
             )
             return report
 
-    def _consolidate_locked(self, store: MemoryV2Store, index: MemoryV2Index) -> ConsolidationReport:
+    def _consolidate_locked(
+        self,
+        store: MemoryV2Store,
+        index: MemoryV2Index,
+        *,
+        eligible_candidate_ids: set[str] | None = None,
+    ) -> ConsolidationReport:
         candidates = store.list_candidates()
         report = ConsolidationReport()
         updated_candidates: List[CandidateMemory] = []
@@ -148,6 +190,10 @@ class RuleBasedConsolidator:
                 continue
 
             report.considered += 1
+            if eligible_candidate_ids is not None and candidate.id not in eligible_candidate_ids:
+                updated_candidates.append(candidate)
+                report.skipped += 1
+                continue
             if not candidate.source_refs and not self._should_reject(candidate) and not self._should_archive_only(candidate):
                 rejected = self._with_decision(
                     candidate,

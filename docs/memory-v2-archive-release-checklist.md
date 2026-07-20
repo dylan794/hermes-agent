@@ -8,7 +8,7 @@ python scripts/frontier_release_gate.py
 
 This is the Phase 10 rollout gate for Memory v2 archive import, search/show, extraction, promotion, and prefetch. It is intentionally conservative: the release path starts with synthetic-only fixtures, then dogfood isolation, then dry-run, then small confirmed imports with health checks.
 
-This checklist is documentation and operator policy. If a centralized feature-flag module is added later, keep the defaults here and in code synchronized.
+This checklist is documentation and operator policy. Keep these defaults synchronized with `plugins/memory/memory_v2/config.py`.
 
 ## Privacy boundary
 
@@ -44,13 +44,13 @@ Each stage must be explicitly signed off before moving to the next. If a gate fa
 5. Read-only archive search/show enabled
    - Scope: `memory_v2_archive_search` and `memory_v2_archive_show` over imported evidence.
    - Required proof: search/show packets are bounded, source-backed, hash/integrity labeled, and fenced as untrusted archive evidence.
-   - Executable gate: `memory_v2_archive_readiness` must return `ready=true` / `mutations_allowed=false`; local coverage command is `python -m pytest tests/plugins/memory/test_memory_v2_archive_readiness.py -q`.
+   - Executable gate: `memory_v2_archive_readiness` must return `ready=true` / `mutations_allowed=false`; local coverage command is `./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_archive_readiness.py -q`.
    - Mutations: none.
 
 6. Candidate extraction enabled
    - Scope: extraction may create pending candidates from archive evidence.
    - Required proof: candidates cite resolvable source refs, injection/secret bait is suppressed or held, and no durable semantic writes happen automatically.
-   - Executable gate: `memory_v2_extract_candidates` is absent/disabled by default; when `memory_v2.extraction.enabled=true` and `memory_v2.extraction.candidate_creation_enabled=true`, it must return `ready=true`, `mutations_allowed=pending_candidates_only`, and only candidate-count deltas. Local coverage command is `python -m pytest tests/plugins/memory/test_memory_v2_extraction_rollout.py -q`.
+   - Executable gate: `memory_v2_extract_candidates` is absent/disabled by default; when `memory_v2.extraction.enabled=true` and `memory_v2.extraction.candidate_creation_enabled=true`, it must return `ready=true`, `mutations_allowed=pending_candidates_only`, and only candidate-count deltas. Local coverage command is `./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_extraction_rollout.py -q`.
    - Mutations: pending candidates only.
 
 7. Semantic promotion with review gate
@@ -76,25 +76,30 @@ These are the desired Phase 10 defaults for a safe initial rollout. Keep mutatin
 | --- | --- | --- |
 | `memory_v2.archive.enabled` | `true` | Allow the archive subsystem to exist for synthetic/dogfood/read-only gates. |
 | `memory_v2.archive.backfill_enabled` | `false` | Keep SessionDB import disabled until dry-run and confirmation gates pass. |
-| `memory_v2.archive.search_tools_enabled` | `true` | Permit bounded read-only archive search once archive health is ok. |
-| `memory_v2.archive.show_tools_enabled` | `true` | Permit bounded read-only source/archive show once archive health is ok. |
+| `memory_v2.archive.capture_enabled` | `false` | Keep automatic conversation capture disabled until an operator opts in. |
+| `memory_v2.archive.search_tools_enabled` | `false` | Keep private archive search hidden until the read-only rollout stage. |
+| `memory_v2.archive.show_tools_enabled` | `false` | Keep private archive source display hidden until the read-only rollout stage. |
+| `memory_v2.archive.prefetch_raw_enabled` | `false` | Keep raw archive hydration out of automatic prefetch by default. |
 | `memory_v2.archive.include_tool_outputs` | `false` | Exclude tool output from import until separate privacy/poisoning review. |
 | `memory_v2.extraction.enabled` | `false` | Keep offline candidate extraction disabled until Step 6 is explicitly gated. |
 | `memory_v2.extraction.candidate_creation_enabled` | `false` | Candidate creation from archive evidence must be an explicit opt-in and pending-only. |
 | `memory_v2.extraction.small_model_enabled` | `false` | Optional structured model extraction requires this flag plus an explicitly supplied adapter; validated output remains pending-only. |
 | `memory_v2.consolidation.enabled` | `false` | Disable automatic consolidation/promotion for initial rollout. |
 | `memory_v2.prefetch.enabled` | `false` | Disable automatic online memory injection until late-stage gated rollout. |
+| `memory_v2.review_apply.enabled` | `false` | Keep model-visible review rejection actions disabled by default. |
 | `memory_v2.auto_promote.enabled` | `false` | Never automatically promote semantic memory in the initial release. |
 
-Equivalent YAML shape if/when centralized config exists:
+Equivalent YAML shape:
 
 ```yaml
 memory_v2:
   archive:
     enabled: true
+    capture_enabled: false
     backfill_enabled: false
-    search_tools_enabled: true
-    show_tools_enabled: true
+    search_tools_enabled: false
+    show_tools_enabled: false
+    prefetch_raw_enabled: false
     include_tool_outputs: false
   extraction:
     enabled: false
@@ -103,6 +108,8 @@ memory_v2:
   consolidation:
     enabled: false
   prefetch:
+    enabled: false
+  review_apply:
     enabled: false
   auto_promote:
     enabled: false
@@ -114,10 +121,10 @@ Run these from the repository root after activating the local virtualenv. They a
 
 ```bash
 ./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_*.py tests/plugins/memory/evals tests/agent/test_memory_provider.py
-python -m pytest tests/plugins/memory/test_memory_v2_raw_archive_perf.py -q
-python -m pytest tests/plugins/memory/test_memory_v2_adversarial_archive.py -q
-python -m pytest tests/plugins/memory/test_memory_v2_archive_readiness.py -q
-python -m pytest tests/plugins/memory/test_memory_v2_extraction_rollout.py -q
+./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_raw_archive_perf.py -q
+./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_adversarial_archive.py -q
+./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_archive_readiness.py -q
+./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_extraction_rollout.py -q
 python scripts/memory_v2_privacy_scan.py --mode memory-v2-release-artifacts --format json
 python scripts/memory_v2_privacy_scan.py --mode intentional-adversarial-fixtures --format json
 python scripts/memory_v2_eval.py --dataset plugins/memory/memory_v2/evals/fixtures/local_memory_eval_v1.yaml --baseline no_memory --baseline raw_fts --baseline memory_v2

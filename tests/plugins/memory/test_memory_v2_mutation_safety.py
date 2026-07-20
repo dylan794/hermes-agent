@@ -223,13 +223,17 @@ def test_interrupted_operation_is_detected_and_fail_closed_until_recovered(tmp_p
     assert "interrupted operation" in blocked.error
 
     repair = MemoryHealthChecker(provider.store, provider.index).repair(dry_run=False)
-    assert any(action["action"] == "mark_interrupted_operation_failed" for action in repair["actions"])
+    assert any(
+        action["action"] == "manual_operation_recovery_required"
+        and action["safe"] is False
+        for action in repair["actions"]
+    )
     records = provider.store.list_operation_records()
     assert records[-1]["operation_id"] == "op_interrupted"
-    assert records[-1]["status"] == "failed"
+    assert records[-1]["status"] == "prepared"
 
-    allowed = MemoryOperationService(provider.store, provider.index).reject_candidate("cand_interrupted", "after recovery")
-    assert allowed.success is True
+    still_blocked = MemoryOperationService(provider.store, provider.index).reject_candidate("cand_interrupted", "after unsafe repair attempt")
+    assert still_blocked.success is False
 
 
 def test_direct_provider_mutation_tools_require_review_plan_action_fingerprint(tmp_path):
@@ -371,7 +375,11 @@ def test_consolidator_holds_lock_and_fails_closed_on_interrupted_operation(tmp_p
 
     monkeypatch.setattr(provider.store, "profile_lock", tracked_lock)
     monkeypatch.setattr(provider.store, "list_candidates", checked_candidates)
-    report = RuleBasedConsolidator().consolidate(provider.store, provider.index)
+    report = RuleBasedConsolidator().consolidate(
+        provider.store,
+        provider.index,
+        authorize_mutation=True,
+    )
     assert report.rejected == 1
     outer = [row for row in provider.store.list_operation_records() if row["type"] == "rule_based_consolidation"]
     assert [row["status"] for row in outer] == ["prepared", "committed"]
@@ -379,7 +387,11 @@ def test_consolidator_holds_lock_and_fails_closed_on_interrupted_operation(tmp_p
     provider.store.append_candidate(CandidateMemory(id="cand_blocked_consolidate", type="procedure_ref", claim="Another procedure", proposed_destination="skills"))
     provider.store.append_operation_record({"operation_id": "op_unrecovered", "type": "test", "status": "recovery_required"})
     with pytest.raises(ValidationError, match="interrupted operation"):
-        RuleBasedConsolidator().consolidate(provider.store, provider.index)
+        RuleBasedConsolidator().consolidate(
+            provider.store,
+            provider.index,
+            authorize_mutation=True,
+        )
     blocked = next(candidate for candidate in original_list() if candidate.id == "cand_blocked_consolidate")
     assert getattr(blocked.gate_decision, "value", blocked.gate_decision) == "pending"
 

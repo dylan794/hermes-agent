@@ -629,6 +629,8 @@ def test_working_memory_tracks_current_focus_and_last_exchange(tmp_path):
 def test_consolidation_persists_open_loop_candidates_and_prefetch_recalls_them(
     tmp_path,
 ):
+    from plugins.memory.memory_v2.consolidation import RuleBasedConsolidator
+
     provider = _new_provider()
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="discord")
     provider.sync_turn(
@@ -637,7 +639,11 @@ def test_consolidation_persists_open_loop_candidates_and_prefetch_recalls_them(
         session_id="session-1",
     )
 
-    result = json.loads(provider.handle_tool_call("memory_v2_consolidate", {}))
+    result = RuleBasedConsolidator().consolidate(
+        provider.store,
+        provider.index,
+        authorize_mutation=True,
+    ).to_dict()
     loops = provider.store.list_open_loops()
     prefetch = provider.prefetch("what open loops are pending?", session_id="session-1")
 
@@ -653,13 +659,19 @@ def test_consolidation_persists_open_loop_candidates_and_prefetch_recalls_them(
 def test_session_end_archives_working_memory_snapshot_without_dropping_open_loops(
     tmp_path,
 ):
+    from plugins.memory.memory_v2.consolidation import RuleBasedConsolidator
+
     provider = _new_provider()
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="cli")
     provider.on_turn_start(1, "Continue Memory v2")
     provider.sync_turn(
         "Remember to follow up on dangling source refs tomorrow.", "Tracked."
     )
-    provider.handle_tool_call("memory_v2_consolidate", {})
+    RuleBasedConsolidator().consolidate(
+        provider.store,
+        provider.index,
+        authorize_mutation=True,
+    )
 
     provider.on_session_end([
         {"role": "user", "content": "Continue Memory v2"},

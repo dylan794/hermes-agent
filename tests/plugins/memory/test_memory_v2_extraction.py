@@ -181,9 +181,10 @@ def test_daily_extraction_leaves_new_candidates_pending_until_later_review(tmp_p
     report = run_daily_consolidation_report(
         provider.store,
         provider.index,
-        date="2026-06-24",
-        allow_consolidation=True,
-        allow_extraction=True,
+            date="2026-06-24",
+            allow_consolidation=True,
+            authorize_mutation=True,
+            allow_extraction=True,
         run_extraction=True,
     )
 

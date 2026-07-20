@@ -13,6 +13,8 @@ places.  The goals are deliberately boring and important:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -48,6 +50,13 @@ class MemoryOperationResult:
         return data
 
 
+def candidate_fingerprint(candidate: CandidateMemory | Dict[str, Any]) -> str:
+    """Digest the complete candidate state used by an authorized mutation."""
+    payload = candidate.to_dict() if isinstance(candidate, CandidateMemory) else dict(candidate)
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class MemoryOperationService:
     """State-machine layer for mutating Memory v2 records."""
 
@@ -55,7 +64,14 @@ class MemoryOperationService:
         self.store = store
         self.index = index
 
-    def reject_candidate(self, candidate_id: str, reason: str, *, actor: str = "manual_tool") -> MemoryOperationResult:
+    def reject_candidate(
+        self,
+        candidate_id: str,
+        reason: str,
+        *,
+        actor: str = "manual_tool",
+        expected_candidate_fingerprint: str = "",
+    ) -> MemoryOperationResult:
         candidate_id = str(candidate_id or "").strip()
         reason = str(reason or "").strip()
         if not candidate_id:
@@ -76,6 +92,8 @@ class MemoryOperationService:
                 target = next((candidate for candidate in candidates if candidate.id == candidate_id), None)
                 if target is None:
                     return self._error(operation_type, f"candidate not found: {candidate_id}")
+                if expected_candidate_fingerprint and candidate_fingerprint(target) != expected_candidate_fingerprint:
+                    return self._error(operation_type, "candidate changed since authorization; regenerate the review plan")
                 if target.gate_decision == GateDecision.REJECTED:
                     return MemoryOperationResult(
                         success=True,
@@ -142,6 +160,7 @@ class MemoryOperationService:
         force_reason: str = "",
         session_id: str = "",
         actor: str = "manual_tool",
+        expected_candidate_fingerprint: str = "",
     ) -> MemoryOperationResult:
         candidate_id = str(candidate_id or "").strip()
         if not candidate_id:
@@ -162,6 +181,8 @@ class MemoryOperationService:
                 target = next((candidate for candidate in candidates if candidate.id == candidate_id), None)
                 if target is None:
                     return self._error(operation_type, f"candidate not found: {candidate_id}")
+                if expected_candidate_fingerprint and candidate_fingerprint(target) != expected_candidate_fingerprint:
+                    return self._error(operation_type, "candidate changed since authorization; regenerate the review plan")
                 if target.proposed_destination.strip().lower() == "skills" or str(getattr(target.type, "value", target.type)) == "procedure_ref":
                     return self._error(
                         operation_type,

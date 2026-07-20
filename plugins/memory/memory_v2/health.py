@@ -100,39 +100,6 @@ class MemoryHealthChecker:
                         "mutates": "canonical memory files; manual rollback or completion required",
                     }
                 )
-            elif issue.repair == "mark_interrupted_operation_failed":
-                action = {
-                    "action": "mark_interrupted_operation_failed",
-                    "safe": True,
-                    "reason": issue.message,
-                    "record_id": issue.record_id,
-                    "mutates": "audit journal only; canonical mutation remains blocked until marked failed",
-                }
-                if not dry_run:
-                    try:
-                        with self.store.profile_lock():
-                            latest = self._latest_operation_statuses()
-                            if latest.get(issue.record_id, {}).get("status") == "prepared":
-                                self.store.append_operation_record(
-                                    {
-                                        "operation_id": issue.record_id,
-                                        "type": latest[issue.record_id].get("type") or latest[issue.record_id].get("operation") or "unknown",
-                                        "operation": latest[issue.record_id].get("operation") or latest[issue.record_id].get("type") or "unknown",
-                                        "status": "failed",
-                                        "actor": "health_repair",
-                                        "reason": "marking interrupted prepared operation failed before allowing future mutations",
-                                        "before_ids": latest[issue.record_id].get("before_ids") or [],
-                                        "after_ids": latest[issue.record_id].get("after_ids") or [],
-                                        "metadata": {"recovered_from": "prepared_without_terminal_status"},
-                                    }
-                                )
-                                action["result"] = {"status": "failed"}
-                            else:
-                                action["result"] = {"status": "already_terminal"}
-                    except Exception as exc:
-                        action["safe"] = False
-                        action["error"] = str(exc)
-                actions.append(action)
         for issue in self._memory_lifecycle_issues() + self._source_ref_issues() + self._candidate_issues() + self._raw_archive_issues():
             if issue.repair and issue.repair != "rebuild_index":
                 actions.append(
@@ -309,10 +276,10 @@ class MemoryHealthChecker:
                 issues.append(
                     MemoryHealthIssue(
                         code="interrupted_operation",
-                        severity="error",
-                        message=f"operation {operation_id} was prepared but has no committed/failed terminal record",
+                        severity="critical",
+                        message=f"operation {operation_id} was prepared but has no terminal record; canonical writes may have started, so manual rollback or completion is required before future mutations",
                         record_id=operation_id,
-                        repair="mark_interrupted_operation_failed",
+                        repair="manual_operation_recovery_required",
                         details={"operation_type": str(record.get("type") or record.get("operation") or "")},
                     )
                 )

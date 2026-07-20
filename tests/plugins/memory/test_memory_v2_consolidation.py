@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import yaml
+
 from plugins.memory.memory_v2.consolidation import RuleBasedConsolidator
 from plugins.memory.memory_v2.index import MemoryV2Index
 from plugins.memory.memory_v2.schemas import CandidateMemory, GateDecision, MemoryItem, MemoryStatus, ProjectCard, ProjectStatus
@@ -21,6 +23,23 @@ def _seed_sources(store: MemoryV2Store, *event_ids: str) -> None:
         store.append_raw_event({"id": event_id, "type": "turn", "user_content": f"source evidence {event_id}"})
 
 
+def _authorized_provider(tmp_path, *, platform):
+    config_path = tmp_path / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config.setdefault("memory_v2", {}).setdefault("auto_promote", {})["enabled"] = True
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    from plugins.memory.memory_v2 import MemoryV2Provider
+
+    provider = MemoryV2Provider()
+    provider.initialize(
+        "session-1",
+        hermes_home=str(tmp_path),
+        platform=platform,
+        memory_v2_mutation_authorizer=lambda scope, context: scope == "auto_promote",
+    )
+    return provider
+
+
 def test_consolidation_promotes_pending_preference_to_canonical_memory_item(tmp_path):
     store, index = _store_and_index(tmp_path)
     _seed_sources(store, "event_123")
@@ -37,7 +56,7 @@ def test_consolidation_promotes_pending_preference_to_canonical_memory_item(tmp_
     store.append_candidate(candidate)
     index.index_candidate(candidate)
 
-    report = RuleBasedConsolidator().consolidate(store, index)
+    report = RuleBasedConsolidator().consolidate(store, index, authorize_mutation=True)
 
     assert report.promoted == 1
     assert report.rejected == 0
@@ -71,7 +90,7 @@ def test_consolidation_rejects_procedure_candidates_without_semantic_promotion(t
     )
     store.append_candidate(candidate)
 
-    report = RuleBasedConsolidator().consolidate(store, index)
+    report = RuleBasedConsolidator().consolidate(store, index, authorize_mutation=True)
 
     assert report.promoted == 0
     assert report.rejected == 1
@@ -92,7 +111,7 @@ def test_consolidation_archives_open_loop_candidates_without_semantic_memory(tmp
     )
     store.append_candidate(candidate)
 
-    report = RuleBasedConsolidator().consolidate(store, index)
+    report = RuleBasedConsolidator().consolidate(store, index, authorize_mutation=True)
 
     assert report.promoted == 0
     assert report.archived_only == 1
@@ -129,7 +148,7 @@ def test_consolidation_supersedes_existing_same_type_subject_and_predicate(tmp_p
     )
     store.append_candidate(candidate)
 
-    report = RuleBasedConsolidator().consolidate(store, index)
+    report = RuleBasedConsolidator().consolidate(store, index, authorize_mutation=True)
 
     assert report.promoted == 1
     assert report.superseded == 1
@@ -180,7 +199,7 @@ def test_consolidation_does_not_supersede_unrelated_preference_with_broad_predic
     )
     store.append_candidate(candidate)
 
-    report = RuleBasedConsolidator().consolidate(store, index)
+    report = RuleBasedConsolidator().consolidate(store, index, authorize_mutation=True)
 
     assert report.superseded_ids == ["pref_old_voice"]
     assert store.read_memory_item("pref_response_style").status == MemoryStatus.ACTIVE
@@ -197,7 +216,7 @@ def test_consolidation_rejects_source_less_semantic_candidate(tmp_path):
     )
     store.append_candidate(candidate)
 
-    report = RuleBasedConsolidator().consolidate(store, index)
+    report = RuleBasedConsolidator().consolidate(store, index, authorize_mutation=True)
 
     assert report.promoted == 0
     assert report.rejected == 1
@@ -233,7 +252,7 @@ def test_consolidation_merges_project_state_candidate_into_project_card(tmp_path
     )
     store.append_candidate(candidate)
 
-    report = RuleBasedConsolidator().consolidate(store, index)
+    report = RuleBasedConsolidator().consolidate(store, index, authorize_mutation=True)
 
     assert report.promoted == 1
     assert report.promoted_ids == ["project:memory-v2"]
@@ -293,7 +312,7 @@ def test_consolidation_project_updates_merge_lists_status_and_dedupe_sources(tmp
     for candidate in candidates:
         store.append_candidate(candidate)
 
-    report = RuleBasedConsolidator().consolidate(store, index)
+    report = RuleBasedConsolidator().consolidate(store, index, authorize_mutation=True)
 
     assert report.promoted == 4
     assert report.promoted_ids == ["project:memory-v2"] * 4
@@ -319,7 +338,7 @@ def test_consolidation_rejects_project_update_without_source_refs(tmp_path):
         )
     )
 
-    report = RuleBasedConsolidator().consolidate(store, index)
+    report = RuleBasedConsolidator().consolidate(store, index, authorize_mutation=True)
 
     assert report.promoted == 0
     assert report.rejected == 1
@@ -339,7 +358,7 @@ def test_consolidation_rejects_dangling_source_refs(tmp_path):
         )
     )
 
-    report = RuleBasedConsolidator().consolidate(store, index)
+    report = RuleBasedConsolidator().consolidate(store, index, authorize_mutation=True)
 
     assert report.promoted == 0
     assert report.rejected == 1
@@ -349,21 +368,22 @@ def test_consolidation_rejects_dangling_source_refs(tmp_path):
 
 
 def test_provider_project_updates_land_in_project_card_and_prefetch_renders_fields(tmp_path):
-    from plugins.memory.memory_v2 import MemoryV2Provider
-
-    provider = MemoryV2Provider()
-    provider.initialize("session-1", hermes_home=str(tmp_path), platform="discord")
+    provider = _authorized_provider(tmp_path, platform="discord")
     provider.sync_turn(
         "Remember that Project Memory v2 next action: improve project-card continuity recall.",
         "Queued.",
         session_id="session-1",
     )
 
-    report = provider.handle_tool_call("memory_v2_consolidate", {})
+    report = RuleBasedConsolidator().consolidate(
+        provider.store,
+        provider.index,
+        authorize_mutation=True,
+    )
     card = provider.store.read_project_card("Memory v2")
     packet = provider.prefetch("Where did we leave Memory v2?", session_id="session-1")
 
-    assert '"promoted": 1' in report
+    assert report.promoted == 1
     assert provider.store.list_memory_items(memory_type="project_state") == []
     assert card is not None
     assert card.next_actions == ["improve project-card continuity recall."]
@@ -373,10 +393,7 @@ def test_provider_project_updates_land_in_project_card_and_prefetch_renders_fiel
 
 
 def test_provider_consolidation_tool_reports_counts_and_updates_status(tmp_path):
-    from plugins.memory.memory_v2 import MemoryV2Provider
-
-    provider = MemoryV2Provider()
-    provider.initialize("session-1", hermes_home=str(tmp_path), platform="cli")
+    provider = _authorized_provider(tmp_path, platform="cli")
     provider.sync_turn(
         "Remember that Alex prefers Memory v2 promotion to preserve source refs.",
         "Queued.",

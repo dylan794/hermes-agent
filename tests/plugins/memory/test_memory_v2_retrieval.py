@@ -1378,6 +1378,8 @@ def test_procedure_lookup_prefers_procedure_ref_over_project_state(tmp_path):
 def test_packet_composer_prefers_promoted_canonical_item_over_promoted_candidate(
     tmp_path,
 ):
+    from plugins.memory.memory_v2.consolidation import RuleBasedConsolidator
+
     store, index = _store_and_index(tmp_path)
     provider = MemoryV2Provider()
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="discord")
@@ -1386,7 +1388,11 @@ def test_packet_composer_prefers_promoted_canonical_item_over_promoted_candidate
         "Queued.",
         session_id="session-1",
     )
-    provider.handle_tool_call("memory_v2_consolidate", {})
+    RuleBasedConsolidator().consolidate(
+        provider.store,
+        provider.index,
+        authorize_mutation=True,
+    )
 
     packet = MemoryPacketComposer(provider.index).compose(
         "What do I prefer for retrieval packets?"

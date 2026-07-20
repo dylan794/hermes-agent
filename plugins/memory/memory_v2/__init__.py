@@ -77,7 +77,7 @@ HEALTH_SCHEMA = {
 
 REPAIR_SCHEMA = {
     "name": "memory_v2_repair",
-    "description": "Repair safe derived Memory v2 state. By default dry_run=true; non-dry runs only rebuild derived indexes, not canonical memory files.",
+    "description": "Repair safe derived Memory v2 state. By default dry_run=true; non-dry runs only rebuild derived indexes/manifests, not canonical memory files or interrupted journals.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -475,6 +475,7 @@ class MemoryV2Provider(MemoryProvider):
         self._index: MemoryV2Index | None = None
         self._config = MemoryV2FeatureFlags()
         self._extraction_model_adapter: Any = None
+        self._mutation_authorizer: Any = None
         self._initialized = False
 
     @property
@@ -525,6 +526,8 @@ class MemoryV2Provider(MemoryProvider):
         self._config = load_memory_v2_config(self._hermes_home)
         adapter = kwargs.get("extraction_model_adapter")
         self._extraction_model_adapter = adapter if callable(adapter) else None
+        authorizer = kwargs.get("memory_v2_mutation_authorizer")
+        self._mutation_authorizer = authorizer if callable(authorizer) else None
         self._base_dir = self._hermes_home / "memory_v2"
         self._store = MemoryV2Store(self._base_dir)
         self._index = MemoryV2Index(self._base_dir / "indexes" / "memory.sqlite")
@@ -857,15 +860,31 @@ class MemoryV2Provider(MemoryProvider):
             ):
                 continue
             summary, _ = escape_untrusted_evidence_text(result_text)
+            outcome = OfflineSessionExtractor.classify_tool_outcome(result_text)
+            if outcome == "completed":
+                claim = f"Tool {tool_name} completed: {summary[:500]}"
+                claim_kind = "completed_action"
+            elif outcome == "failed":
+                claim = f"Tool {tool_name} failed: {summary[:500]}"
+                claim_kind = "contradiction"
+            elif outcome == "blocked":
+                claim = f"Tool {tool_name} was blocked: {summary[:500]}"
+                claim_kind = "blocker"
+            else:
+                claim = f"Tool {tool_name} result observed: {summary[:500]}"
+                claim_kind = "other"
             candidate = CandidateMemory(
                 id=f"cand_{raw_id}",
                 type=MemoryType.EPISODE,
-                claim=f"Tool {tool_name} completed: {summary[:500]}",
-                proposed_destination="episode",
+                claim=claim,
+                proposed_destination="episodic/tool-results",
                 confidence=0.8,
                 importance=0.5,
-                promotion_reason="pending: source-backed bounded tool-result episode",
+                promotion_reason=f"pending: source-backed bounded {outcome} tool-result episode",
                 source_refs=[raw_id],
+                claim_kind=claim_kind,
+                extraction_method="deterministic_tool_capture",
+                extractor_version="memory_v2_tool_outcome_v1",
             )
             with self.store.profile_lock():
                 if self._find_duplicate_candidate(candidate) is None:
@@ -897,8 +916,26 @@ class MemoryV2Provider(MemoryProvider):
         if self._config.consolidation.enabled:
             schemas.extend([CONSOLIDATE_SCHEMA, DAILY_REPORT_SCHEMA, DREAM_CYCLE_SCHEMA])
         if self._config.review_apply.enabled:
-            schemas.extend([REVIEW_APPLY_SCHEMA, PROMOTE_SCHEMA, REJECT_SCHEMA])
+            schemas.extend([REVIEW_APPLY_SCHEMA, REJECT_SCHEMA])
         return schemas
+
+    def _external_mutation_authorized(self, scope: str) -> bool:
+        """Ask a trusted host callback; model tool arguments cannot grant authority."""
+        if self._mutation_authorizer is None:
+            return False
+        try:
+            return bool(
+                self._mutation_authorizer(
+                    str(scope),
+                    {
+                        "session_id": self._session_id,
+                        "platform": self._platform,
+                        "provider": self.name,
+                    },
+                )
+            )
+        except Exception:
+            return False
 
     def _tool_disabled_error(self, tool_name: str, flag_path: str) -> str:
         return json.dumps({
@@ -907,6 +944,11 @@ class MemoryV2Provider(MemoryProvider):
         })
 
     def _disabled_tool_json(self, tool_name: str) -> str | None:
+        if tool_name == "memory_v2_promote":
+            return json.dumps({
+                "success": False,
+                "error": "Memory v2 promotion requires external operator authority; model tools cannot grant or replay that authority",
+            })
         # Open-loop updates have no review-plan action/fingerprint contract yet;
         # keep the legacy direct mutation handler unreachable from model tools.
         if tool_name == "memory_v2_resolve_open_loop":
@@ -1205,7 +1247,16 @@ class MemoryV2Provider(MemoryProvider):
         if tool_name == "memory_v2_extract_candidates":
             return json.dumps(self._extract_candidates_payload(args))
         if tool_name == "memory_v2_consolidate":
-            report = RuleBasedConsolidator().consolidate(self.store, self.index)
+            authorize_mutation = bool(
+                self._config.auto_promote.enabled
+                and self._external_mutation_authorized("auto_promote")
+            )
+            report = RuleBasedConsolidator().consolidate(
+                self.store,
+                self.index,
+                authorize_mutation=authorize_mutation,
+                safe_auto_only=True,
+            )
             return json.dumps({"success": True, **report.to_dict()})
         if tool_name == "memory_v2_daily_report":
             from .daily_consolidation import run_daily_consolidation_report
@@ -1216,14 +1267,13 @@ class MemoryV2Provider(MemoryProvider):
                     self.index,
                     date=args.get("date"),
                     allow_consolidation=self._config.consolidation.enabled,
-                    allow_extraction=(
-                        self._config.extraction.enabled
-                        and self._config.extraction.candidate_creation_enabled
+                    authorize_mutation=bool(
+                        self._config.auto_promote.enabled
+                        and self._external_mutation_authorized("auto_promote")
                     ),
-                    run_extraction=(
-                        self._config.extraction.enabled
-                        and self._config.extraction.candidate_creation_enabled
-                    ),
+                    safe_auto_only=True,
+                    allow_extraction=False,
+                    run_extraction=False,
                 )
             except ValueError as exc:
                 return json.dumps({"success": False, "error": str(exc)})
@@ -1844,6 +1894,7 @@ class MemoryV2Provider(MemoryProvider):
             str(args.get("candidate_id") or ""),
             str(args.get("reason") or action.get("reason") or "reviewed rejection"),
             actor="manual_tool_review_plan",
+            expected_candidate_fingerprint=str(action.get("candidate_fingerprint") or ""),
         )
         return result.to_dict()
 
@@ -1861,6 +1912,7 @@ class MemoryV2Provider(MemoryProvider):
             force=False,
             session_id=self._session_id,
             actor="manual_tool_review_plan",
+            expected_candidate_fingerprint=str(validated["action"].get("candidate_fingerprint") or ""),
         )
         return result.to_dict()
 

@@ -34,6 +34,8 @@ def run_daily_consolidation_report(
     date: str | None = None,
     recent_raw_limit: int = 20,
     allow_consolidation: bool = False,
+    authorize_mutation: bool = False,
+    safe_auto_only: bool = False,
     allow_extraction: bool = False,
     run_extraction: bool = False,
 ) -> dict[str, Any]:
@@ -45,7 +47,12 @@ def run_daily_consolidation_report(
     report_date = _normalized_date(date)
     before_counts = _counts(store)
     if allow_consolidation:
-        consolidation = RuleBasedConsolidator().consolidate(store, index).to_dict()
+        consolidation = RuleBasedConsolidator().consolidate(
+            store,
+            index,
+            authorize_mutation=authorize_mutation,
+            safe_auto_only=safe_auto_only,
+        ).to_dict()
     else:
         consolidation = {
             "success": True,
@@ -179,8 +186,9 @@ def main(argv: list[str] | None = None) -> int:
         index,
         date=args.date,
         allow_consolidation=flags.consolidation.enabled,
-        allow_extraction=(flags.extraction.enabled and flags.extraction.candidate_creation_enabled),
-        run_extraction=(flags.extraction.enabled and flags.extraction.candidate_creation_enabled),
+        authorize_mutation=False,
+        allow_extraction=False,
+        run_extraction=False,
     )
     print(json.dumps(report, sort_keys=True))
     return 0

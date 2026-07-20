@@ -169,6 +169,34 @@ class OfflineSessionExtractor:
     def __init__(self, *, model_adapter: Optional[StructuredModelAdapter] = None) -> None:
         self.model_adapter = model_adapter
 
+    @classmethod
+    def user_evidence_supports_completion(cls, text: str) -> bool:
+        """Return whether user evidence asserts, rather than negates, completion."""
+        return bool(
+            cls._USER_COMPLETED_RE.search(str(text or ""))
+            and not cls._NEGATED_COMPLETION_RE.search(str(text or ""))
+        )
+
+    @classmethod
+    def classify_tool_outcome(cls, text: str) -> str:
+        """Classify bounded tool evidence with failures/blockers taking precedence."""
+        value = str(text or "")
+        has_failure = bool(
+            cls._TEST_FAILURE_RE.search(value)
+            and not cls._NEGATED_FAILURE_RE.search(value)
+        )
+        has_blocker = bool(
+            cls._BLOCKER_RE.search(value)
+            and not cls._NEGATED_BLOCKER_RE.search(value)
+        )
+        if has_failure:
+            return "failed"
+        if has_blocker:
+            return "blocked"
+        if cls._COMPLETED_RE.search(value):
+            return "completed"
+        return "observed"
+
     def extract(
         self,
         store: MemoryV2Store,
@@ -262,7 +290,7 @@ class OfflineSessionExtractor:
             rows.append(self._row(MemoryType.PROJECT_STATE, "blocker", f"Blocker: {self._finish_sentence(match.group('value'))}", "working/open_loops.yaml", 0.78, 0.72, 0.78, [blocker_span]))
         for match in self._USER_COMPLETED_RE.finditer(clean):
             completion_text = match.group(0)
-            if self._NEGATED_COMPLETION_RE.search(completion_text):
+            if not self.user_evidence_supports_completion(completion_text):
                 continue
             completed_span = self._span(event, "user_content", completion_text, role="user") or span
             rows.append(self._row(MemoryType.EPISODE, "completed_action", f"Completed action: {self._finish_sentence(match.group('value'))}", "semantic/items", 0.78, 0.58, 0.68, [completed_span]))
@@ -288,16 +316,17 @@ class OfflineSessionExtractor:
         tool = redact_text(str(event.get("tool") or "tool"))[:80]
         bounded = self._finish_sentence(re.sub(r"\s+", " ", clean)[:700])
         rows: List[_ExtractedCandidate] = []
-        has_failure = bool(self._TEST_FAILURE_RE.search(clean) and not self._NEGATED_FAILURE_RE.search(clean))
-        has_blocker = bool(self._BLOCKER_RE.search(clean) and not self._NEGATED_BLOCKER_RE.search(clean))
+        outcome = self.classify_tool_outcome(clean)
+        has_failure = outcome == "failed"
+        has_blocker = outcome == "blocked"
         if has_failure:
-            rows.append(self._row(MemoryType.EPISODE, "contradiction", f"Contradiction candidate from {tool}: {bounded}", "semantic/items", 0.82, 0.78, 0.78, [span], negative=[span]))
+            rows.append(self._row(MemoryType.EPISODE, "contradiction", f"Contradiction candidate from {tool}: {bounded}", "episodic/tool-results", 0.82, 0.78, 0.78, [span], negative=[span]))
         if has_blocker:
             rows.append(self._row(MemoryType.PROJECT_STATE, "blocker", f"Blocker observed in {tool}: {bounded}", "working/open_loops.yaml", 0.86, 0.72, 0.8, [span]))
         if self._ENV_TOOL_RE.search(clean):
             rows.append(self._row(MemoryType.ENVIRONMENT, "environment_state", f"Environment state established by {tool}: {bounded}", "semantic/items", 0.9, 0.9, 0.72, [span]))
-        if self._COMPLETED_RE.search(clean) and not has_failure:
-            rows.append(self._row(MemoryType.EPISODE, "completed_action", f"Completed action verified by {tool}: {bounded}", "semantic/items", 0.9, 0.62, 0.7, [span]))
+        if outcome == "completed":
+            rows.append(self._row(MemoryType.EPISODE, "completed_action", f"Completed action verified by {tool}: {bounded}", "episodic/tool-results", 0.9, 0.62, 0.7, [span]))
         return rows
 
     def _accepted_proposals(self, events: List[Dict[str, Any]]) -> List[_ExtractedCandidate]:
@@ -625,8 +654,8 @@ class OfflineSessionExtractor:
                 self._BLOCKER_RE.search(text) and not self._NEGATED_BLOCKER_RE.search(text) for text in tool_texts
             )
         if claim_kind == CandidateClaimKind.COMPLETED_ACTION.value:
-            return any(self._USER_COMPLETED_RE.search(text) for text in user_texts) or any(
-                self._COMPLETED_RE.search(text) and not self._NEGATED_FAILURE_RE.search(text) for text in tool_texts
+            return any(self.user_evidence_supports_completion(text) for text in user_texts) or any(
+                self.classify_tool_outcome(text) == "completed" for text in tool_texts
             )
         if claim_kind == CandidateClaimKind.AUTHORITATIVE_ARTIFACT.value:
             return any(self._ARTIFACT_AUTHORITY_RE.search(text) for text in user_texts)

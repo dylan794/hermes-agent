@@ -202,12 +202,31 @@ def register_local_artifact(
                 existing.metadata["retrieval_disabled"] = True
                 store.write_artifact_record(existing)
                 return existing
-            record.metadata["source_uris"] = source_uris
-            record.metadata["raw_ref"] = str(existing.metadata.get("raw_ref") or raw_ref)
-            if privacy_rank.get(existing_privacy, 1) > privacy_rank.get(incoming_privacy, 1):
-                record.privacy_level = PrivacyLevel.coerce(existing_privacy, "privacy_level")
-            store.write_artifact_record(record)
-            return record
+            # Duplicate registration is an enrichment event, never a reset.
+            # Start from the persisted record so security decisions, derived
+            # state, and review metadata cannot be weakened by registering the
+            # same bytes through a new path.
+            existing.metadata["source_uris"] = source_uris
+            existing.metadata["raw_ref"] = str(existing.metadata.get("raw_ref") or raw_ref)
+            # Keep the current registration's media identity so extraction is
+            # decided from its declared modality/path, not from the extension
+            # of the first deduplicated raw copy.
+            existing.source_uri = record.source_uri
+            existing.source_type = record.source_type
+            existing.modality = record.modality
+            existing.metadata["original_filename"] = record.metadata["original_filename"]
+            existing.metadata["size_bytes"] = record.metadata["size_bytes"]
+            existing.metadata["suffix"] = record.metadata["suffix"]
+            if privacy_rank.get(incoming_privacy, 1) > privacy_rank.get(existing_privacy, 1):
+                existing.privacy_level = PrivacyLevel.coerce(incoming_privacy, "privacy_level")
+            existing.source_refs = list(dict.fromkeys(existing.source_refs + record.source_refs))
+            existing.derived_refs = list(dict.fromkeys(existing.derived_refs + record.derived_refs))
+            for step, status in record.processing_status.items():
+                existing.processing_status.setdefault(step, status)
+            if existing.project_id is None and record.project_id is not None:
+                existing.project_id = record.project_id
+            store.write_artifact_record(existing)
+            return existing
         record.metadata["source_uris"] = [record.source_uri]
         store.write_artifact_record(record)
     return record

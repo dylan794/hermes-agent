@@ -158,6 +158,37 @@ def test_duplicate_artifact_registration_cannot_downgrade_privacy_or_provenance(
     assert second.resolve().as_uri() in duplicate.metadata["source_uris"]
 
 
+def test_duplicate_artifact_registration_preserves_security_and_processing_state(tmp_path):
+    store, _index = _store_index(tmp_path)
+    first = tmp_path / "risky-first.txt"
+    second = tmp_path / "risky-second.txt"
+    first.write_text("same risky bytes", encoding="utf-8")
+    second.write_text("same risky bytes", encoding="utf-8")
+    record = register_local_artifact(store, first)
+    record.injection_risk = "confirmed"
+    record.processing_status["text_extract"] = "done"
+    record.source_refs = ["source_existing"]
+    record.derived_refs = ["segment_existing"]
+    record.metadata.update(
+        {
+            "retrieval_disabled": True,
+            "injection_risk_reason": "instruction-shaped evidence",
+            "injection_risk_flagged_at": "2026-07-20T00:00:00+00:00",
+        }
+    )
+    store.write_artifact_record(record)
+
+    duplicate = register_local_artifact(store, second, privacy_level="public")
+
+    assert duplicate.injection_risk == "confirmed"
+    assert duplicate.processing_status["text_extract"] == "done"
+    assert duplicate.source_refs == ["source_existing"]
+    assert duplicate.derived_refs == ["segment_existing"]
+    assert duplicate.metadata["retrieval_disabled"] is True
+    assert duplicate.metadata["injection_risk_reason"] == "instruction-shaped evidence"
+    assert duplicate.metadata["injection_risk_flagged_at"] == "2026-07-20T00:00:00+00:00"
+
+
 def test_negated_or_failed_user_completion_does_not_create_completed_action():
     extractor = OfflineSessionExtractor()
     examples = [
@@ -182,3 +213,37 @@ def test_negated_or_failed_user_completion_does_not_create_completed_action():
         completed = [row for row in mixed if row.claim_kind == "completed_action"]
         assert len(completed) == 1
         assert "docs" in completed[0].claim
+
+
+def test_structured_completion_validation_uses_same_negation_and_tool_outcome_rules():
+    extractor = OfflineSessionExtractor()
+
+    def span(text, *, role="user"):
+        return {
+            "source_id": "evt",
+            "field": "user_content" if role == "user" else "result",
+            "role": role,
+            "text": text,
+            "start": 0,
+            "end": len(text),
+        }
+
+    events = {"evt": {"id": "evt", "type": "turn"}}
+    assert not extractor._model_evidence_supports(
+        "completed_action",
+        [span("I completed the migration but it failed validation.")],
+        [],
+        events=events,
+    )
+    assert not extractor._model_evidence_supports(
+        "completed_action",
+        [span("Completed with 2 failed tests.", role="tool")],
+        [],
+        events=events,
+    )
+    assert extractor._model_evidence_supports(
+        "completed_action",
+        [span("12 passed, 0 failed.", role="tool")],
+        [],
+        events=events,
+    )

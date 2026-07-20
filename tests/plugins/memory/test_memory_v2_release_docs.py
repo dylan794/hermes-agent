@@ -31,8 +31,8 @@ REQUIRED_STAGES = [
 REQUIRED_FLAGS = {
     "memory_v2.archive.enabled": "true",
     "memory_v2.archive.backfill_enabled": "false",
-    "memory_v2.archive.search_tools_enabled": "true",
-    "memory_v2.archive.show_tools_enabled": "true",
+    "memory_v2.archive.search_tools_enabled": "false",
+    "memory_v2.archive.show_tools_enabled": "false",
     "memory_v2.archive.include_tool_outputs": "false",
     "memory_v2.extraction.enabled": "false",
     "memory_v2.extraction.candidate_creation_enabled": "false",
@@ -44,10 +44,10 @@ REQUIRED_FLAGS = {
 
 REQUIRED_GATE_COMMANDS = [
     "./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_*.py tests/plugins/memory/evals tests/agent/test_memory_provider.py",
-    "python -m pytest tests/plugins/memory/test_memory_v2_raw_archive_perf.py -q",
-    "python -m pytest tests/plugins/memory/test_memory_v2_adversarial_archive.py -q",
-    "python -m pytest tests/plugins/memory/test_memory_v2_archive_readiness.py -q",
-    "python -m pytest tests/plugins/memory/test_memory_v2_extraction_rollout.py -q",
+    "./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_raw_archive_perf.py -q",
+    "./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_adversarial_archive.py -q",
+    "./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_archive_readiness.py -q",
+    "./scripts/run_tests.sh tests/plugins/memory/test_memory_v2_extraction_rollout.py -q",
     "python scripts/memory_v2_privacy_scan.py --mode memory-v2-release-artifacts --format json",
     "python scripts/memory_v2_privacy_scan.py --mode intentional-adversarial-fixtures --format json",
     "python scripts/memory_v2_eval.py --dataset plugins/memory/memory_v2/evals/fixtures/local_memory_eval_v1.yaml --baseline no_memory --baseline raw_fts --baseline memory_v2",

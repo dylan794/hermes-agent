@@ -11,7 +11,7 @@ import hashlib
 import json
 from typing import Any, Dict, List
 
-from .operations import MemoryOperationService
+from .operations import MemoryOperationService, candidate_fingerprint
 from .redaction import redact_text
 from .review import MemoryReviewQueue
 from .schemas import GateDecision
@@ -90,6 +90,8 @@ class MemoryReviewPlanner:
                 "requires_action_ids": True,
                 "requires_confirm": True,
                 "confirm_value": CONFIRM_REVIEW_APPLY,
+                "model_apply_operations": ["reject_candidate"],
+                "promotion_authority": "external_operator_only",
             },
         }
 
@@ -118,16 +120,7 @@ class MemoryReviewPlanner:
 
     @staticmethod
     def _candidate_fingerprint(candidate: Dict[str, Any]) -> str:
-        fields = {
-            "id": candidate.get("id"),
-            "type": candidate.get("type"),
-            "claim": candidate.get("claim"),
-            "proposed_destination": candidate.get("proposed_destination"),
-            "confidence": candidate.get("confidence"),
-            "source_refs": candidate.get("source_refs") or [],
-            "gate_decision": candidate.get("gate_decision"),
-        }
-        return hashlib.sha256(json.dumps(fields, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        return candidate_fingerprint(candidate)
 
     def _source_check(self, source_refs: List[str]) -> Dict[str, Any]:
         """Return source metadata only; review plans never hydrate raw archive text."""
@@ -250,9 +243,18 @@ class MemoryReviewApplier:
                         "error": "automatic promotion is disabled until stronger Memory v2 evals exist",
                     })
                     continue
-                result = service.promote_candidate(candidate.id, actor="review_apply")
+                result = service.promote_candidate(
+                    candidate.id,
+                    actor="review_apply",
+                    expected_candidate_fingerprint=action["candidate_fingerprint"],
+                )
             elif action["operation"] == "reject_candidate":
-                result = service.reject_candidate(candidate.id, action.get("reason") or "review_apply_reject", actor="review_apply")
+                result = service.reject_candidate(
+                    candidate.id,
+                    action.get("reason") or "review_apply_reject",
+                    actor="review_apply",
+                    expected_candidate_fingerprint=action["candidate_fingerprint"],
+                )
             else:
                 failed.append({"action_id": action_id, "candidate_id": candidate.id, "error": "unsupported operation"})
                 continue

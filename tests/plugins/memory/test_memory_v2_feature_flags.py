@@ -70,7 +70,7 @@ def test_disabled_tools_are_rejected_even_if_called_directly(tmp_path) -> None:
     promote_payload = _tool_json(provider, "memory_v2_promote", {"candidate_id": "cand_missing"})
     assert promote_payload == {
         "success": False,
-        "error": "Memory v2 tool disabled by feature flag: memory_v2_promote (memory_v2.review_apply.enabled)",
+        "error": "Memory v2 promotion requires external operator authority; model tools cannot grant or replay that authority",
     }
 
 

@@ -42,18 +42,11 @@ def test_manual_promote_candidate_routes_through_audited_operation(tmp_path):
 
     plan = json.loads(provider.handle_tool_call("memory_v2_review_plan", {"candidate_ids": [candidate.id]}))
     action = plan["actions"][0]
-    result = json.loads(
-        provider.handle_tool_call(
-            "memory_v2_promote",
-            {
-                "candidate_id": candidate.id,
-                "plan_id": plan["plan_id"],
-                "action_id": action["action_id"],
-                "candidate_fingerprint": action["candidate_fingerprint"],
-                "confirm": "APPLY_MEMORY_V2_REVIEW_PLAN",
-            },
-        )
-    )
+    result = MemoryOperationService(provider.store, provider.index).promote_candidate(
+        candidate.id,
+        actor="external_operator",
+        expected_candidate_fingerprint=action["candidate_fingerprint"],
+    ).to_dict()
 
     assert result["success"] is True
     assert result["operation_id"].startswith("op_")
