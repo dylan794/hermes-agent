@@ -16,8 +16,9 @@ import yaml
 from ..index import MemoryV2Index
 from ..operations import MemoryOperationService, candidate_fingerprint
 from ..redaction import contains_sensitive_text, redact_text
+from ..review import MemoryReviewQueue
 from ..retrieval import MemoryQueryRouter
-from ..schemas import GateDecision, MemoryType
+from ..schemas import CandidateMemory, GateDecision, MemoryType
 from ..store import MemoryV2Store
 from .datasets import EvalEvent, EvalQuery
 from .metrics import estimate_tokens
@@ -35,6 +36,43 @@ _EVAL_MUTATION_POLICY = {
 def _authorize_eval_auto_promote(scope: str, context: dict[str, Any]) -> bool:
     """Grant the eval harness's narrow, non-model mutation authority."""
     return scope == "auto_promote" and context.get("platform") == "eval"
+
+
+def _is_explicit_correction_candidate(
+    candidate: CandidateMemory, review_item: dict[str, Any]
+) -> bool:
+    """Identify eval-reviewable explicit corrections without benchmark labels."""
+    candidate_type = getattr(candidate.type, "value", str(candidate.type))
+    if candidate_type not in {
+        MemoryType.PREFERENCE.value,
+        MemoryType.ENVIRONMENT.value,
+    }:
+        return False
+    if review_item.get("review_lane") != "needs_dylan":
+        return False
+    flags = dict(review_item.get("flags") or {})
+    if any(
+        flags.get(flag)
+        for flag in (
+            "skill_candidate",
+            "adversarial_or_policy_bait",
+            "secret_or_config_bait",
+            "unsafe_identifier",
+            "ephemeral",
+        )
+    ):
+        return False
+    text = f" {candidate.claim} {candidate.promotion_reason} ".lower()
+    return any(
+        marker in text
+        for marker in (
+            " instead of ",
+            " no longer ",
+            " changed from ",
+            " replaced ",
+            " supersede_existing ",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -166,6 +204,16 @@ class MemoryV2Baseline:
                 "promoted_project_card_ids": [],
                 "blocked_candidate_ids": [],
                 "failed_candidate_ids": [],
+                "correction_lane": {
+                    "policy": "source_grounded_explicit_correction",
+                    "eligible_types": ["environment", "preference"],
+                    "considered_candidate_ids": [],
+                    "promoted_candidate_ids": [],
+                    "promoted_memory_ids": [],
+                    "blocked_candidate_ids": [],
+                    "failed_candidate_ids": [],
+                    "candidate_fingerprints": {},
+                },
             },
             "user_events_archived": 0,
             "session_finalizations": 0,
@@ -312,7 +360,17 @@ memory_v2:
         return dict(self._pipeline_stats)
 
     def _run_trusted_eval_operator_review(self, *, authorized: bool) -> dict[str, Any]:
-        """Promote only source-grounded project candidates under eval authority."""
+        """Promote source-grounded project and explicit correction candidates."""
+        correction_lane: dict[str, Any] = {
+            "policy": "source_grounded_explicit_correction",
+            "eligible_types": ["environment", "preference"],
+            "considered_candidate_ids": [],
+            "promoted_candidate_ids": [],
+            "promoted_memory_ids": [],
+            "blocked_candidate_ids": [],
+            "failed_candidate_ids": [],
+            "candidate_fingerprints": {},
+        }
         telemetry: dict[str, Any] = {
             "policy": "trusted_eval_operator_review",
             "authorized": authorized,
@@ -322,30 +380,52 @@ memory_v2:
             "blocked_candidate_ids": [],
             "failed_candidate_ids": [],
             "candidate_fingerprints": {},
+            "correction_lane": correction_lane,
         }
         if not authorized:
             return telemetry
 
-        candidate_ids = [
-            candidate.id
+        pending = {
+            candidate.id: candidate
             for candidate in self.store.list_candidates()
             if candidate.gate_decision == GateDecision.PENDING
-            and candidate.type == MemoryType.PROJECT_STATE
-        ]
-        telemetry["considered_candidate_ids"] = list(candidate_ids)
-        operations = MemoryOperationService(self.store, self.index)
-        for candidate_id in candidate_ids:
-            candidate = next(
-                (
-                    item
-                    for item in self.store.list_candidates()
-                    if item.id == candidate_id
-                    and item.gate_decision == GateDecision.PENDING
-                ),
-                None,
+        }
+        project_candidate_ids = sorted(
+            candidate.id
+            for candidate in pending.values()
+            if candidate.type == MemoryType.PROJECT_STATE
+        )
+        review_items = {
+            str(item.get("id") or ""): item
+            for item in MemoryReviewQueue(self.store).build(limit=500).get("items") or []
+            if str(item.get("id") or "")
+        }
+        correction_candidate_ids = sorted(
+            candidate_id
+            for candidate_id, candidate in pending.items()
+            if candidate_id in review_items
+            and _is_explicit_correction_candidate(
+                candidate, review_items[candidate_id]
             )
+        )
+        correction_lane["considered_candidate_ids"] = list(correction_candidate_ids)
+        candidate_lanes = [
+            ("project_state", candidate_id)
+            for candidate_id in project_candidate_ids
+        ] + [
+            ("correction", candidate_id)
+            for candidate_id in correction_candidate_ids
+        ]
+        telemetry["considered_candidate_ids"] = [
+            candidate_id for _lane, candidate_id in candidate_lanes
+        ]
+        operations = MemoryOperationService(self.store, self.index)
+        for lane, candidate_id in candidate_lanes:
+            candidate = pending.get(candidate_id)
             if candidate is None:
                 telemetry["blocked_candidate_ids"].append(candidate_id)
+                if lane == "correction":
+                    correction_lane["blocked_candidate_ids"].append(candidate_id)
                 continue
             source_grounded = bool(candidate.source_refs) and all(
                 self.store.source_ref_exists(source_ref, index=self.index)
@@ -353,20 +433,34 @@ memory_v2:
             )
             if not source_grounded:
                 telemetry["blocked_candidate_ids"].append(candidate_id)
+                if lane == "correction":
+                    correction_lane["blocked_candidate_ids"].append(candidate_id)
                 continue
 
             fingerprint = candidate_fingerprint(candidate)
             telemetry["candidate_fingerprints"][candidate_id] = fingerprint
+            if lane == "correction":
+                correction_lane["candidate_fingerprints"][candidate_id] = fingerprint
             result = operations.promote_candidate(
                 candidate_id,
-                actor="trusted_eval_operator_review",
+                actor=(
+                    "trusted_eval_operator_correction_review"
+                    if lane == "correction"
+                    else "trusted_eval_operator_review"
+                ),
                 expected_candidate_fingerprint=fingerprint,
             )
             if not result.success:
                 telemetry["failed_candidate_ids"].append(candidate_id)
+                if lane == "correction":
+                    correction_lane["failed_candidate_ids"].append(candidate_id)
                 continue
             telemetry["promoted_candidate_ids"].append(candidate_id)
-            telemetry["promoted_project_card_ids"].extend(result.ids)
+            if lane == "correction":
+                correction_lane["promoted_candidate_ids"].append(candidate_id)
+                correction_lane["promoted_memory_ids"].extend(result.ids)
+            else:
+                telemetry["promoted_project_card_ids"].extend(result.ids)
         return telemetry
 
     def retrieve(self, query: EvalQuery) -> EvalResult:

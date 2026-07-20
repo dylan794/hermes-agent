@@ -21,6 +21,10 @@ from plugins.memory.memory_v2.evals.reports import build_acceptance_scorecard
 from plugins.memory.memory_v2.evals.runners import run_eval
 
 FIXTURES = Path(__file__).parent / "fixtures"
+HARD_FIXTURE = (
+    Path(__file__).parents[4]
+    / "plugins/memory/memory_v2/evals/fixtures/hard_longitudinal_memory_v2_v1.yaml"
+)
 
 
 def test_eval_dataset_loader_reads_local_fixture():
@@ -215,6 +219,53 @@ def test_eval_project_operator_review_requires_harness_callback(tmp_path, monkey
     assert review["authorized"] is False
     assert review["promoted_candidate_ids"] == []
     assert baseline.store.list_project_cards() == []
+
+
+def test_eval_operator_review_has_separate_fingerprinted_correction_lane(tmp_path):
+    dataset = load_eval_dataset(HARD_FIXTURE)
+    baseline = MemoryV2Baseline(tmp_path / "memory_v2")
+
+    baseline.ingest_dataset(dataset)
+    baseline.consolidate()
+
+    review = baseline.pipeline_metrics()["trusted_eval_operator_review"]
+    correction = review["correction_lane"]
+    expected = [
+        "cand_hard_evt_env_current",
+        "cand_hard_evt_pref_voice_current",
+    ]
+    assert correction["policy"] == "source_grounded_explicit_correction"
+    assert correction["eligible_types"] == ["environment", "preference"]
+    assert correction["considered_candidate_ids"] == expected
+    assert correction["promoted_candidate_ids"] == expected
+    assert correction["blocked_candidate_ids"] == []
+    assert correction["failed_candidate_ids"] == []
+    assert set(correction["candidate_fingerprints"]) == set(expected)
+    assert all(
+        len(fingerprint) == 64
+        for fingerprint in correction["candidate_fingerprints"].values()
+    )
+    assert len(correction["promoted_memory_ids"]) == 2
+
+    statuses_by_source = {
+        source_ref: item.status.value
+        for item in baseline.store.list_memory_items()
+        for source_ref in item.source_refs
+    }
+    assert statuses_by_source["hard_evt_pref_voice_current"] == "active"
+    assert statuses_by_source["hard_evt_pref_voice_old"] == "superseded"
+    assert statuses_by_source["hard_evt_decoy_voice_project"] == "superseded"
+    assert statuses_by_source["hard_evt_pref_style"] == "active"
+    assert statuses_by_source["hard_evt_env_current"] == "active"
+    assert statuses_by_source["hard_evt_env_old"] == "superseded"
+    assert {
+        record["actor"]
+        for record in baseline.store.list_operation_records()
+        if record["type"].startswith("promote_candidate_")
+    } >= {
+        "trusted_eval_operator_review",
+        "trusted_eval_operator_correction_review",
+    }
 
 
 def test_eval_harness_authority_is_scope_and_platform_bound():
@@ -694,11 +745,7 @@ def test_chronological_contract_retrieval_is_complete_after_consolidation(tmp_pa
 
 
 def test_hard_fixture_retrieval_respects_required_and_forbidden_sources(tmp_path):
-    hard_fixture = (
-        Path(__file__).parents[4]
-        / "plugins/memory/memory_v2/evals/fixtures/hard_longitudinal_memory_v2_v1.yaml"
-    )
-    dataset = load_eval_dataset(hard_fixture)
+    dataset = load_eval_dataset(HARD_FIXTURE)
     baseline = MemoryV2Baseline(tmp_path / "hard-memory-v2")
     baseline.ingest_dataset(dataset)
     baseline.consolidate()
