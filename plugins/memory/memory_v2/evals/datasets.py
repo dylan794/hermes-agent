@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -276,13 +277,19 @@ def build_chronological_contract_datasets() -> list[EvalDataset]:
     }
     datasets: list[EvalDataset] = []
     for days in (30, 90, 365):
-        start_month = {30: 1, 90: 2, 365: 3}[days]
-        events = [
+        start = datetime(2025, 1, 1, 9, 0, tzinfo=timezone.utc)
+
+        def at(day_offset: int) -> str:
+            return (start + timedelta(days=day_offset)).isoformat().replace("+00:00", "Z")
+
+        decision_day = max(2, days // 3)
+        current_preference_day = max(decision_day + 1, days - 2)
+        core_events = [
             EvalEvent(
                 id=f"chrono_{days}_evt_001_goal",
                 session_id=f"chrono-{days}-s1",
                 role="user",
-                created_at=f"2025-{start_month:02d}-01T09:00:00Z",
+                created_at=at(0),
                 text=f"Project Chronos {days} goal: keep chronological Memory v2 contracts source-grounded.",
                 metadata={"kind": "project_goal", "day_offset": 0},
             ),
@@ -290,35 +297,52 @@ def build_chronological_contract_datasets() -> list[EvalDataset]:
                 id=f"chrono_{days}_evt_002_pref_old",
                 session_id=f"chrono-{days}-s1",
                 role="user",
-                created_at=f"2025-{start_month:02d}-10T09:00:00Z",
+                created_at=at(1),
                 text=f"Remember that Chronos {days} notification preference is morning digest.",
-                metadata={"kind": "stale_preference", "day_offset": 9},
+                metadata={"kind": "stale_preference", "day_offset": 1},
             ),
             EvalEvent(
                 id=f"chrono_{days}_evt_003_decision",
                 session_id=f"chrono-{days}-s2",
                 role="user",
-                created_at=f"2025-{start_month:02d}-20T09:00:00Z",
+                created_at=at(decision_day),
                 text=f"Project Chronos {days} decision: restart the provider after ingest checkpoint one.",
-                metadata={"kind": "restart_checkpoint", "day_offset": min(days - 1, 19)},
+                metadata={"kind": "restart_checkpoint", "day_offset": decision_day},
             ),
             EvalEvent(
                 id=f"chrono_{days}_evt_004_pref_new",
                 session_id=f"chrono-{days}-s3",
                 role="user",
-                created_at=f"2025-{start_month:02d}-25T09:00:00Z",
+                created_at=at(current_preference_day),
                 text=f"Remember that Chronos {days} notification preference is now afternoon digest.",
-                metadata={"kind": "current_preference", "day_offset": min(days - 1, 24)},
+                metadata={"kind": "current_preference", "day_offset": current_preference_day},
             ),
             EvalEvent(
                 id=f"chrono_{days}_evt_005_next",
                 session_id=f"chrono-{days}-s4",
                 role="user",
-                created_at=f"2025-{start_month:02d}-28T09:00:00Z",
+                created_at=at(days),
                 text=f"Project Chronos {days} next action: rebuild the Memory v2 index and verify retrieval parity.",
-                metadata={"kind": "rebuild_checkpoint", "day_offset": min(days - 1, 27)},
+                metadata={"kind": "rebuild_checkpoint", "day_offset": days},
             ),
         ]
+        reserved_days = {0, 1, decision_day, current_preference_day, days}
+        distractors = [
+            EvalEvent(
+                id=f"chrono_{days}_distractor_{day_offset:03d}",
+                session_id=f"chrono-{days}-noise-{day_offset:03d}",
+                role="user",
+                created_at=at(day_offset),
+                text=(
+                    f"Routine Project Meridian status note {day_offset}: archive dashboard metrics "
+                    "and continue the weekly index review."
+                ),
+                metadata={"kind": "longitudinal_distractor", "day_offset": day_offset},
+            )
+            for day_offset in range(3, days, 7)
+            if day_offset not in reserved_days
+        ]
+        events = sorted(core_events + distractors, key=lambda event: (event.created_at, event.id))
         queries = [
             EvalQuery(
                 id=f"chrono_{days}_q_current_pref",
@@ -348,6 +372,9 @@ def build_chronological_contract_datasets() -> list[EvalDataset]:
                 metadata={
                     "benchmark_tier": "contract",
                     "contract_window_days": days,
+                    "actual_event_span_days": days,
+                    "distractor_count": len(distractors),
+                    "evaluation_time": at(days + 1),
                     "ingestion_order": "chronological",
                     "restart_checkpoint_after_event_ids": [f"chrono_{days}_evt_003_decision"],
                     "rebuild_index_checkpoint_after_event_ids": [f"chrono_{days}_evt_005_next"],

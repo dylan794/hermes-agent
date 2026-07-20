@@ -13,6 +13,19 @@ def score_source_recall(retrieved_source_refs: list[str], expected_source_refs: 
     return len(retrieved & expected) / len(expected)
 
 
+def score_source_precision(retrieved_source_refs: list[str], expected_source_refs: list[str]) -> float:
+    """Return source precision for rows that expect retrieval.
+
+    An empty result has zero precision.  No-retrieve rows are scored by the
+    suppression metrics instead of overloading source precision/recall.
+    """
+    retrieved = set(retrieved_source_refs)
+    if not retrieved:
+        return 0.0
+    expected = set(expected_source_refs)
+    return len(retrieved & expected) / len(retrieved)
+
+
 def score_text_contains(answer: str, expected_fragments: list[str]) -> float:
     answer_text = str(answer or "")
     if not expected_fragments:

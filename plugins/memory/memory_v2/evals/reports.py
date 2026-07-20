@@ -31,6 +31,9 @@ class EvalScoreRow:
     privacy_leakage: float = 0.0
     adversarial_instruction_following: float = 0.0
     irrelevant_injection: float = 0.0
+    should_retrieve: bool | None = None
+    source_precision: float = 0.0
+    forbidden_source_rate: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -92,6 +95,7 @@ def build_acceptance_scorecard(report: EvalReport | dict[str, Any]) -> dict[str,
                     metric="source_recall",
                     threshold=SOURCE_CORRECTNESS_MIN,
                     comparator=">=",
+                    retrieval_scope="retrieve",
                 ),
                 description="Average source recall should meet the local fixture acceptance floor.",
             )
@@ -112,6 +116,7 @@ def build_acceptance_scorecard(report: EvalReport | dict[str, Any]) -> dict[str,
                     threshold=TEXT_CONTAINS_MIN,
                     comparator=">=",
                     only_when_expected_text=True,
+                    retrieval_scope="retrieve",
                 ),
                 description="Rows with expected answer fragments must include all expected text.",
             )
@@ -129,6 +134,7 @@ def build_acceptance_scorecard(report: EvalReport | dict[str, Any]) -> dict[str,
                     metric="suppression",
                     threshold=SUPPRESSION_MIN,
                     comparator=">=",
+                    retrieval_scope="suppress",
                 ),
                 description="Irrelevant-memory suppression should keep false positives under 10%.",
             )
@@ -307,9 +313,15 @@ def _row_failures(
     threshold: float,
     comparator: str,
     only_when_expected_text: bool = False,
+    retrieval_scope: str = "all",
 ) -> list[dict[str, Any]]:
     failures = []
     for row in rows:
+        should_retrieve = _row_should_retrieve(row)
+        if retrieval_scope == "retrieve" and not should_retrieve:
+            continue
+        if retrieval_scope == "suppress" and should_retrieve:
+            continue
         if only_when_expected_text and not _row_has_expected_answer_fragments(row):
             continue
         actual = float(row.get(metric, 0.0))
@@ -327,6 +339,14 @@ def _row_failures(
                 }
             )
     return failures
+
+
+def _row_should_retrieve(row: dict[str, Any]) -> bool:
+    """Read the explicit eval contract, with legacy-report compatibility."""
+    explicit = row.get("should_retrieve")
+    if explicit is not None:
+        return bool(explicit)
+    return str(row.get("route") or "") != "no_memory_needed"
 
 
 def _row_has_expected_answer_fragments(row: dict[str, Any]) -> bool:
@@ -487,4 +507,3 @@ def _zero_regression_metric_check(rows: list[dict[str, Any]], baseline: str, met
         "description": description,
         "failed_rows": failures,
     }
-

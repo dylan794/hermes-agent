@@ -7,7 +7,13 @@ import re
 
 from plugins.memory.memory_v2.evals.baselines import MemoryV2Baseline, NoMemoryBaseline, RawFTSBaseline
 from plugins.memory.memory_v2.evals.datasets import EvalEvent, EvalQuery, load_eval_dataset
-from plugins.memory.memory_v2.evals.metrics import estimate_tokens, score_irrelevant_suppression, score_source_recall, score_text_contains
+from plugins.memory.memory_v2.evals.metrics import (
+    estimate_tokens,
+    score_irrelevant_suppression,
+    score_source_precision,
+    score_source_recall,
+    score_text_contains,
+)
 from plugins.memory.memory_v2.evals.reports import build_acceptance_scorecard
 from plugins.memory.memory_v2.evals.runners import run_eval
 
@@ -26,6 +32,8 @@ def test_eval_dataset_loader_reads_local_fixture():
 def test_eval_metrics_are_deterministic():
     assert score_source_recall(["event_a", "event_b"], ["event_a"]) == 1.0
     assert score_source_recall(["event_a"], ["event_a", "event_b"]) == 0.5
+    assert score_source_precision(["event_a", "event_b"], ["event_a"]) == 0.5
+    assert score_source_precision([], ["event_a"]) == 0.0
     assert score_text_contains("Alex prefers concise answers.", ["concise", "answers"]) == 1.0
     assert score_text_contains("Alex prefers concise answers.", ["concise", "source-grounded"]) == 0.5
     assert score_irrelevant_suppression(should_retrieve=False, retrieved_count=0) == 1.0
@@ -493,16 +501,41 @@ def test_memory_v2_eval_baseline_has_no_eval_only_precision_or_gold_label_access
 
 def test_chronological_contract_datasets_cover_30_90_365_days_and_checkpoints():
     from plugins.memory.memory_v2.evals.datasets import build_chronological_contract_datasets
+    from datetime import datetime
 
     datasets = build_chronological_contract_datasets()
 
     assert {dataset.metadata["contract_window_days"] for dataset in datasets} == {30, 90, 365}
+    distractor_counts = []
     for dataset in datasets:
         timestamps = [event.created_at for event in dataset.events]
         assert timestamps == sorted(timestamps)
+        first = datetime.fromisoformat(timestamps[0].replace("Z", "+00:00"))
+        last = datetime.fromisoformat(timestamps[-1].replace("Z", "+00:00"))
+        assert (last - first).days == dataset.metadata["contract_window_days"]
+        assert dataset.metadata["actual_event_span_days"] == dataset.metadata["contract_window_days"]
+        distractor_counts.append(dataset.metadata["distractor_count"])
         assert dataset.metadata["ingestion_order"] == "chronological"
         assert dataset.metadata["restart_checkpoint_after_event_ids"]
         assert dataset.metadata["rebuild_index_checkpoint_after_event_ids"]
         assert dataset.metadata["human_baseline_methodology"]["mode"] == "honest_human_timed_open_book"
         assert dataset.metadata["human_baseline_methodology"]["uses_fixture_answers"] is False
         assert dataset.queries
+    assert distractor_counts == sorted(distractor_counts)
+    assert len(set(distractor_counts)) == 3
+
+
+def test_memory_v2_eval_runs_offline_extraction_at_session_finalization(tmp_path):
+    from plugins.memory.memory_v2.evals.baselines import MemoryV2Baseline
+    from plugins.memory.memory_v2.evals.datasets import build_chronological_contract_datasets
+
+    dataset = build_chronological_contract_datasets()[0]
+    baseline = MemoryV2Baseline(tmp_path / "memory-v2-baseline")
+
+    baseline.ingest_dataset(dataset)
+    metrics = baseline.pipeline_metrics()
+
+    assert metrics["user_events_archived"] == len(dataset.events)
+    assert metrics["session_finalizations"] > 0
+    assert metrics["extraction_failures"] == 0
+    assert metrics["extraction_candidates_created"] >= 2

@@ -130,6 +130,7 @@ class MemoryV2Baseline:
         self.limit = limit
         self._provider = None
         self._events_by_id: dict[str, EvalEvent] = {}
+        self._pipeline_stats: dict[str, Any] = {}
         self._reset_store()
 
     def _reset_store(self) -> None:
@@ -140,6 +141,15 @@ class MemoryV2Baseline:
         self._provider = self._new_provider(session_id="eval")
         self.store = self._provider.store
         self.index = self._provider.index
+        self._pipeline_stats = {
+            "user_events_archived": 0,
+            "session_finalizations": 0,
+            "extraction_considered_events": 0,
+            "extraction_candidates_created": 0,
+            "extraction_candidates_merged": 0,
+            "extraction_skipped": 0,
+            "extraction_failures": 0,
+        }
 
     def _write_eval_config(self) -> None:
         (self.hermes_home / "config.yaml").write_text(
@@ -182,8 +192,10 @@ memory_v2:
         self._reset_store()
         assert self._provider is not None
         self._events_by_id = {event.id: event for event in events}
-        for event in events:
+        for index, event in enumerate(events):
             self._ingest_event(event)
+            if event.role == "user" and self._is_session_finalization(events, index):
+                self._extract_session(event.session_id)
 
     def ingest_dataset(self, dataset) -> None:
         self._reset_store()
@@ -191,8 +203,10 @@ memory_v2:
         self._events_by_id = {event.id: event for event in dataset.events}
         restart_after = set(dataset.metadata.get("restart_checkpoint_after_event_ids") or [])
         rebuild_after = set(dataset.metadata.get("rebuild_index_checkpoint_after_event_ids") or [])
-        for event in dataset.events:
+        for index, event in enumerate(dataset.events):
             self._ingest_event(event)
+            if event.role == "user" and self._is_session_finalization(dataset.events, index):
+                self._extract_session(event.session_id)
             if event.id in restart_after:
                 self.restart()
             if event.id in rebuild_after:
@@ -210,10 +224,55 @@ memory_v2:
             event_id=event.id,
             created_at=event.created_at,
         )
+        self._pipeline_stats["user_events_archived"] += 1
+
+    @staticmethod
+    def _is_session_finalization(events: list[EvalEvent], index: int) -> bool:
+        current = events[index]
+        for later in events[index + 1 :]:
+            if later.role != "user":
+                continue
+            return later.session_id != current.session_id
+        return True
+
+    def _extract_session(self, session_id: str) -> None:
+        """Run the production extraction tool while its session is authoritative."""
+        assert self._provider is not None
+        self._pipeline_stats["session_finalizations"] += 1
+        payload = json.loads(
+            self._provider.handle_tool_call(
+                "memory_v2_extract_candidates",
+                {"session_id": session_id},
+            )
+        )
+        if not payload.get("success"):
+            self._pipeline_stats["extraction_failures"] += 1
+            return
+        extraction = dict(payload.get("extraction") or {})
+        self._pipeline_stats["extraction_considered_events"] += int(
+            extraction.get("considered_events") or 0
+        )
+        self._pipeline_stats["extraction_candidates_created"] += int(
+            extraction.get("created") or 0
+        )
+        self._pipeline_stats["extraction_candidates_merged"] += int(
+            extraction.get("merged") or 0
+        )
+        self._pipeline_stats["extraction_skipped"] += int(extraction.get("skipped") or 0)
 
     def consolidate(self) -> None:
         assert self._provider is not None
-        self._provider.handle_tool_call("memory_v2_consolidate", {})
+        payload = json.loads(self._provider.handle_tool_call("memory_v2_consolidate", {}))
+        self._pipeline_stats["consolidation_success"] = bool(payload.get("success"))
+        consolidation = dict(payload.get("consolidation") or payload)
+        for key in ("considered", "promoted", "rejected", "archived_only", "skipped"):
+            self._pipeline_stats[f"consolidation_{key}"] = int(consolidation.get(key) or 0)
+        self._pipeline_stats["post_consolidation_candidates"] = self.store.count_candidates()
+        self._pipeline_stats["post_consolidation_memory_items"] = len(self.store.list_memory_items())
+        self._pipeline_stats["post_consolidation_project_cards"] = len(self.store.list_project_cards())
+
+    def pipeline_metrics(self) -> dict[str, Any]:
+        return dict(self._pipeline_stats)
 
     def retrieve(self, query: EvalQuery) -> EvalResult:
         assert self._provider is not None
