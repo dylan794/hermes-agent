@@ -310,7 +310,9 @@ def test_memory_v2_project_fixture_beats_raw_fts_on_current_status(tmp_path):
     memory_v2 = report.summary["memory_v2"]
     raw_fts = report.summary["raw_fts"]
     assert memory_v2["text_contains_avg"] >= raw_fts["text_contains_avg"]
-    assert memory_v2["source_recall_avg"] >= raw_fts["source_recall_avg"]
+    assert memory_v2["source_recall_avg"] >= raw_fts["source_recall_avg"], repr(
+        report.to_dict()["rows"]
+    )
 
 
 def test_memory_v2_adversarial_fixture_redacts_secrets_and_suppresses_secret_retrieval(tmp_path):
@@ -667,3 +669,55 @@ def test_memory_v2_eval_runs_offline_extraction_at_session_finalization(tmp_path
     assert metrics["session_finalizations"] > 0
     assert metrics["extraction_failures"] == 0
     assert metrics["extraction_candidates_created"] >= 2
+
+
+def test_chronological_contract_retrieval_is_complete_after_consolidation(tmp_path):
+    from plugins.memory.memory_v2.evals.datasets import build_chronological_contract_datasets
+
+    for dataset in build_chronological_contract_datasets():
+        report = run_eval(
+            dataset,
+            baselines=[MemoryV2Baseline(tmp_path / dataset.name)],
+        ).to_dict()
+        rows = [row for row in report["rows"] if row["baseline"] == "memory_v2"]
+        failures = [
+            {
+                "query_id": row["query_id"],
+                "source_recall": row["source_recall"],
+                "text_contains": row["text_contains"],
+                "retrieved_source_refs": row["retrieved_source_refs"],
+            }
+            for row in rows
+            if row["source_recall"] < 1.0 or row["text_contains"] < 1.0
+        ]
+        assert not failures, repr(failures)
+
+
+def test_hard_fixture_retrieval_respects_required_and_forbidden_sources(tmp_path):
+    hard_fixture = (
+        Path(__file__).parents[4]
+        / "plugins/memory/memory_v2/evals/fixtures/hard_longitudinal_memory_v2_v1.yaml"
+    )
+    dataset = load_eval_dataset(hard_fixture)
+    baseline = MemoryV2Baseline(tmp_path / "hard-memory-v2")
+    baseline.ingest_dataset(dataset)
+    baseline.consolidate()
+    failures = []
+    for query in dataset.queries:
+        result = baseline.retrieve(query)
+        retrieved = set(result.retrieved_source_refs)
+        missing = set(query.expected_source_refs) - retrieved
+        forbidden = set(query.forbidden_source_refs) & retrieved
+        text_contains = score_text_contains(result.answer, query.expected_answer_contains)
+        if missing or forbidden or text_contains < 1.0:
+            failures.append(
+                {
+                    "query_id": query.id,
+                    "missing": sorted(missing),
+                    "forbidden": sorted(forbidden),
+                    "text_contains": text_contains,
+                    "retrieved": sorted(retrieved),
+                    "packet": result.memory_packet,
+                }
+            )
+    assert not failures, repr(failures)

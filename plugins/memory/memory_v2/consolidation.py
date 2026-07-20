@@ -458,6 +458,7 @@ class RuleBasedConsolidator:
         update_kind = self._project_update_kind(candidate)
         update_text = self._project_update_text(candidate, update_kind)
         evidence_time = self._project_evidence_time(candidate, store)
+        evidence_order = self._project_evidence_order(candidate, store)
         evidence = self._bootstrap_project_evidence(card)
         if update_kind in {"next_action_resolved", "next_action_stale"}:
             lifecycle = "resolved" if update_kind.endswith("resolved") else "stale"
@@ -467,6 +468,7 @@ class RuleBasedConsolidator:
                 update_text,
                 lifecycle,
                 evidence_time,
+                evidence_order,
                 candidate,
             )
         else:
@@ -486,6 +488,7 @@ class RuleBasedConsolidator:
                 field_name,
                 update_text,
                 evidence_time,
+                evidence_order,
                 candidate,
             )
         self._apply_project_lifecycle(evidence, "next_actions")
@@ -533,6 +536,17 @@ class RuleBasedConsolidator:
             return 0.0, text
 
     @staticmethod
+    def _project_evidence_order(
+        candidate: CandidateMemory, store: MemoryV2Store
+    ) -> int:
+        orders = []
+        for source_id in candidate.source_refs:
+            event = store.get_raw_event_by_id(source_id)
+            if event and event.get("chain_index") is not None:
+                orders.append(int(event["chain_index"]))
+        return max(orders, default=-1)
+
+    @staticmethod
     def _bootstrap_project_evidence(card: ProjectCard) -> dict[str, List[dict]]:
         if card.field_evidence:
             return {
@@ -559,6 +573,7 @@ class RuleBasedConsolidator:
                         "value": text,
                         "status": "current",
                         "observed_at": card.updated_at,
+                        "evidence_order": -1,
                         "source_refs": sorted(set(card.source_refs)),
                     }
                 )
@@ -571,6 +586,7 @@ class RuleBasedConsolidator:
         field_name: str,
         value: str,
         observed_at: str,
+        evidence_order: int,
         candidate: CandidateMemory,
     ) -> None:
         text = str(value or "").strip()
@@ -588,12 +604,16 @@ class RuleBasedConsolidator:
                 entry["candidate_id"] = min(
                     str(entry.get("candidate_id") or candidate.id), candidate.id
                 )
+                entry["evidence_order"] = max(
+                    int(entry.get("evidence_order", -1)), evidence_order
+                )
                 return
         entries.append(
             {
                 "value": text,
                 "status": "current",
                 "observed_at": observed_at,
+                "evidence_order": evidence_order,
                 "source_refs": sorted(set(candidate.source_refs)),
                 "candidate_id": candidate.id,
             }
@@ -603,6 +623,7 @@ class RuleBasedConsolidator:
                 entries,
                 key=lambda entry: (
                     cls._timestamp_key(str(entry.get("observed_at") or "")),
+                    int(entry.get("evidence_order", -1)),
                     str(entry.get("candidate_id") or ""),
                     str(entry.get("value") or ""),
                 ),
@@ -617,6 +638,7 @@ class RuleBasedConsolidator:
         target: str,
         lifecycle: str,
         observed_at: str,
+        evidence_order: int,
         candidate: CandidateMemory,
     ) -> None:
         evidence.setdefault(field_name, []).append(
@@ -624,6 +646,7 @@ class RuleBasedConsolidator:
                 "value": str(target or "").strip() or "*",
                 "status": lifecycle,
                 "observed_at": observed_at,
+                "evidence_order": evidence_order,
                 "source_refs": sorted(set(candidate.source_refs)),
                 "candidate_id": candidate.id,
                 "lifecycle_event": True,
@@ -640,6 +663,7 @@ class RuleBasedConsolidator:
             (entry for entry in entries if entry.get("lifecycle_event")),
             key=lambda entry: (
                 cls._timestamp_key(str(entry.get("observed_at") or "")),
+                int(entry.get("evidence_order", -1)),
                 str(entry.get("candidate_id") or ""),
             ),
         )
@@ -662,6 +686,13 @@ class RuleBasedConsolidator:
                 haystack = re.sub(r"\s+", " ", str(entry.get("value") or "").lower())
                 if cls._timestamp_key(str(entry.get("observed_at") or "")) > cls._timestamp_key(event_time):
                     continue
+                if (
+                    cls._timestamp_key(str(entry.get("observed_at") or ""))
+                    == cls._timestamp_key(event_time)
+                    and int(entry.get("evidence_order", -1))
+                    > int(event.get("evidence_order", -1))
+                ):
+                    continue
                 if needle not in {"", "*"} and needle not in haystack and haystack not in needle:
                     continue
                 entry["status"] = lifecycle
@@ -676,6 +707,7 @@ class RuleBasedConsolidator:
                 (dict(entry) for entry in entries),
                 key=lambda entry: (
                     str(entry.get("observed_at") or ""),
+                    int(entry.get("evidence_order", -1)),
                     str(entry.get("candidate_id") or ""),
                     str(entry.get("value") or ""),
                 ),
@@ -841,6 +873,18 @@ class RuleBasedConsolidator:
             if item.subject != new_item.subject or item.predicate != new_item.predicate:
                 continue
             item_text = " ".join(str(part or "") for part in (item.value, item.summary, item.body, " ".join(item.tags)))
+            new_slots = MemoryV2Index._semantic_slots(candidate.claim) - {
+                "preference",
+                "history",
+                "project_state",
+            }
+            old_slots = MemoryV2Index._semantic_slots(item_text) - {
+                "preference",
+                "history",
+                "project_state",
+            }
+            if new_slots and old_slots and not (new_slots & old_slots):
+                continue
             if candidate_tokens.intersection(self._supersession_tokens(item_text)):
                 superseded.append(item)
         return superseded
@@ -860,6 +904,7 @@ class RuleBasedConsolidator:
             "now",
             "prefers",
             "prefer",
+            "preference",
             "the",
             "to",
             "user",

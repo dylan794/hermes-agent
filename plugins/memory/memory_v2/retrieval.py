@@ -567,47 +567,6 @@ class MemoryQueryRouter:
             ):
                 return f"user {query}"
             return query
-        if any(
-            term in lowered
-            for term in (
-                "exact wording",
-                "exact quote",
-                "what did i say",
-                "when did i say",
-                "where did i say",
-                "come from",
-                "source for",
-                "design request",
-            )
-        ):
-            return query
-        if "memory v2" in lowered or "memory_v2" in lowered:
-            if "what did" in lowered and ("decide" in lowered or "decided" in lowered):
-                return "Memory v2 decision why matters source refs cheap deterministic LLM API"
-            if any(
-                term in lowered
-                for term in (
-                    "changed",
-                    "change",
-                    "decide",
-                    "decided",
-                    "decision",
-                    "why",
-                    "goal",
-                    "blocker",
-                    "source note",
-                    "artifact",
-                    "uncertainty dashboard",
-                )
-            ):
-                return query
-            return "Memory v2"
-        if "qwen" in lowered and "reasoning" in lowered:
-            return "Qwen reasoning loop"
-        if "tts" in lowered and "voice" in lowered:
-            return "user TTS voice preferred"
-        if "usually answer" in lowered or "response style" in lowered:
-            return "user response style direct no-BS tool-grounded"
         return query
 
 
@@ -657,8 +616,10 @@ class MemoryPacketComposer:
         results = self._filter_raw_events_for_session(results, session_id=session_id)
         results = self._filter_for_decision(results, decision)
         results = self._filter_for_temporal_intent(results, decision.temporal_intent)
+        results = self._collapse_current_slots(results, decision)
         ranked = self._rank_for_decision(results, decision)
-        items = self._bounded_items(ranked, decision.token_budget)
+        ranked = self._prune_route_noise(ranked, decision)
+        items = self._bounded_items(ranked, decision.token_budget, decision=decision)
         if decision.route == "project_continuity" and items:
             self.index.log_retrieval(
                 query,
@@ -702,14 +663,45 @@ class MemoryPacketComposer:
         ):
             compact_payload = dict(payload)
             compact_payload["items"] = [
-                MemoryPacketComposer._hard_truncate_item(item, 180)
+                MemoryPacketComposer._minimum_useful_item(item)
                 for item in packet.items
             ]
-            compact_payload["sections"] = packet.sections
+            compact_payload["sections"] = MemoryPacketComposer._reference_sections(
+                packet.sections
+            )
+            compact_payload["retrieval_plan"] = {"route": packet.route}
             rendered = yaml.safe_dump(
                 compact_payload, sort_keys=False, allow_unicode=True
             )
+            if MemoryPacketComposer._estimate_tokens(rendered) > packet.token_budget:
+                compact_payload["sections"] = {}
+                compact_payload.pop("warnings", None)
+                rendered = yaml.safe_dump(
+                    compact_payload, sort_keys=False, allow_unicode=True
+                )
         return rendered
+
+    @staticmethod
+    def _reference_sections(sections: Dict[str, Any]) -> Dict[str, Any]:
+        compact: Dict[str, Any] = {}
+        for key in (
+            "active_project_state",
+            "current_beliefs",
+            "pending_or_candidate_updates",
+            "stale_or_superseded",
+            "top_answer_context",
+        ):
+            values = sections.get(key)
+            if isinstance(values, list):
+                refs = [
+                    {"item_ref": str(value.get("item_ref") or value.get("id") or "")}
+                    for value in values
+                    if isinstance(value, dict)
+                    and str(value.get("item_ref") or value.get("id") or "")
+                ]
+                if refs:
+                    compact[key] = refs[:3]
+        return compact
 
     @staticmethod
     def _retrieval_plan(decision: RoutingDecision) -> Dict[str, Any]:
@@ -1161,6 +1153,82 @@ class MemoryPacketComposer:
             return filtered
         return [item for item in filtered if str(item.get("type") or "") in allowed]
 
+    @classmethod
+    def _collapse_current_slots(
+        cls, results: List[Dict[str, Any]], decision: RoutingDecision
+    ) -> List[Dict[str, Any]]:
+        if decision.route in {
+            "contradiction_check",
+            "deep_recall",
+            "past_conversation_exact",
+        }:
+            return results
+        grouped: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+        passthrough: List[Dict[str, Any]] = []
+        for item in results:
+            item_type = str(item.get("type") or "")
+            if item_type not in {"preference", "environment"}:
+                passthrough.append(item)
+                continue
+            slot = cls._current_view_slot(item)
+            if not slot:
+                passthrough.append(item)
+                continue
+            grouped.setdefault((item_type, slot), []).append(item)
+        collapsed = list(passthrough)
+        for values in grouped.values():
+            collapsed.append(
+                max(
+                    values,
+                    key=lambda item: (
+                        cls._timestamp_epoch(
+                            item.get("evidence_at")
+                            or item.get("updated_at")
+                            or item.get("created_at")
+                        ),
+                        cls._correction_marker_score(item),
+                        float(item.get("hybrid_score") or 0.0),
+                        str(item.get("id") or ""),
+                    ),
+                )
+            )
+        return collapsed
+
+    @staticmethod
+    def _current_view_slot(item: Dict[str, Any]) -> str:
+        haystack = " ".join(
+            str(item.get(field) or "")
+            for field in ("title", "subject", "predicate", "value", "summary", "body")
+        )
+        slots = MemoryV2Index._semantic_slots(haystack) - {
+            "preference",
+            "history",
+            "project_state",
+        }
+        if slots:
+            return "+".join(sorted(slots))
+        if str(item.get("type") or "") == "environment":
+            return "environment"
+        predicate = str(item.get("predicate") or "").strip().lower()
+        return predicate if predicate and predicate != "prefers" else ""
+
+    @staticmethod
+    def _correction_marker_score(item: Dict[str, Any]) -> int:
+        text = " ".join(
+            str(item.get(field) or "")
+            for field in ("value", "summary", "body")
+        ).lower()
+        score = 0
+        if re.search(r"\bnow\b|\bcurrently\b", text):
+            score += 2
+        if "instead of" in text or "no longer" in text:
+            score += 2
+        if re.search(r"\bupdate(?:d)?\b|\bchanged?\b|\breplaced?\b", text):
+            score += 1
+        if re.search(r"\bpreviously\b|\bold\b|\bstale\b", text):
+            score -= 2
+        return score
+
     @staticmethod
     def _filter_for_temporal_intent(
         results: List[Dict[str, Any]], temporal_intent: TemporalIntent
@@ -1225,22 +1293,89 @@ class MemoryPacketComposer:
     def _rank_for_decision(
         results: List[Dict[str, Any]], decision: RoutingDecision
     ) -> List[Dict[str, Any]]:
-        ranked = MemoryPacketComposer._rank_for_route(results, decision.route)
-        if not decision.temporal_intent.prefer_recent:
-            return ranked
+        if decision.route in {"deep_recall", "past_conversation_exact"}:
+            return sorted(
+                results,
+                key=lambda item: (
+                    float(item.get("rank") or 0.0),
+                    str(item.get("id") or ""),
+                ),
+            )
         return sorted(
-            ranked,
+            results,
             key=lambda item: (
+                MemoryPacketComposer._route_status_priority(
+                    decision.route, str(item.get("status") or "")
+                ),
                 MemoryPacketComposer._type_priority(
                     decision.route, str(item.get("type") or "")
                 ),
-                MemoryPacketComposer._status_priority(str(item.get("status") or "")),
+                -MemoryPacketComposer._decision_match_score(item, decision),
+                -float(item.get("hybrid_score") or 0.0),
                 -MemoryPacketComposer._timestamp_epoch(
-                    item.get("updated_at") or item.get("created_at")
+                    item.get("evidence_at")
+                    or item.get("updated_at")
+                    or item.get("created_at")
                 ),
                 float(item.get("rank") or 0.0),
+                str(item.get("id") or ""),
             ),
         )
+
+    @staticmethod
+    def _route_status_priority(route: str, status: str) -> int:
+        if route == "contradiction_check" and status in {
+            "active",
+            "uncertain",
+            "superseded",
+            "stale",
+            "resolved",
+        }:
+            return 0
+        return MemoryPacketComposer._status_priority(status)
+
+    @staticmethod
+    def _prune_route_noise(
+        ranked: List[Dict[str, Any]], decision: RoutingDecision
+    ) -> List[Dict[str, Any]]:
+        if decision.route != "research_recall" or not ranked:
+            return ranked
+        relevant = [
+            item
+            for item in ranked
+            if MemoryPacketComposer._decision_match_score(item, decision) >= 0.75
+        ]
+        return relevant or ranked[:1]
+
+    @staticmethod
+    def _decision_match_score(
+        item: Dict[str, Any], decision: RoutingDecision
+    ) -> float:
+        haystack = " ".join(
+            str(item.get(field) or "")
+            for field in ("id", "title", "subject", "predicate", "value", "summary", "body")
+        ).lower()
+        entity_score = sum(
+            2.0
+            for entity in decision.entities
+            if str(entity or "").strip()
+            and re.search(
+                rf"\b{re.escape(str(entity).lower())}\b",
+                haystack,
+            )
+        )
+        query_terms = set(MemoryV2Index._content_terms(decision.search_query))
+        item_terms = set(MemoryV2Index._content_terms(haystack))
+        overlap = len(query_terms & item_terms) / max(1, len(query_terms))
+        query_slots = MemoryV2Index._semantic_slots(decision.search_query)
+        item_slots = MemoryV2Index._semantic_slots(haystack)
+        slot_score = 1.5 if query_slots & item_slots else 0.0
+        history_link = 0.0
+        if "history" in query_slots and (
+            item.get("superseded_by") or item.get("supersedes")
+        ):
+            history_link = 4.0
+        return entity_score + overlap * 2.0 + slot_score + history_link
 
     @staticmethod
     def _rank_for_route(
@@ -1409,31 +1544,40 @@ class MemoryPacketComposer:
         }
         source_refs = list(item.get("source_refs") or [])
         if source_refs:
-            compact["source_refs"] = source_refs[:1]
-            if len(source_refs) > 1:
+            compact["source_refs"] = source_refs[:4]
+            if len(source_refs) > 4:
                 compact["source_ref_count"] = int(
                     item.get("source_ref_count") or len(source_refs)
                 )
         if item.get("project"):
             project = dict(item.get("project") or {})
-            compact["project"] = {
-                key: value
-                for key, value in {
-                    "name": MemoryPacketComposer._truncate(project.get("name", ""), 100),
-                    "current_state": MemoryPacketComposer._truncate(project.get("current_state", ""), 180),
-                    "next_actions": [
-                        MemoryPacketComposer._truncate(value, 140)
-                        for value in MemoryPacketComposer._project_list(
-                            project.get("next_actions")
-                        )[:1]
-                    ],
-                }.items()
-                if value not in ("", [], None)
-            }
+            minimal_project: Dict[str, Any] = {}
+            for field_name, limit in (
+                ("name", 100),
+                ("current_state", 180),
+                ("goal", 180),
+                ("why_it_matters", 140),
+            ):
+                value = project.get(field_name)
+                if value:
+                    minimal_project[field_name] = MemoryPacketComposer._truncate(
+                        value, limit
+                    )
+            for field_name in ("next_actions", "decisions", "open_questions"):
+                values = MemoryPacketComposer._project_list(project.get(field_name))
+                if values:
+                    minimal_project[field_name] = [
+                        MemoryPacketComposer._truncate(values[0], 160)
+                    ]
+            compact["project"] = minimal_project
         return {key: value for key, value in compact.items() if value not in ("", [], None)}
 
     def _bounded_items(
-        self, results: List[Dict[str, Any]], token_budget: int
+        self,
+        results: List[Dict[str, Any]],
+        token_budget: int,
+        *,
+        decision: RoutingDecision | None = None,
     ) -> List[Dict[str, Any]]:
         if token_budget <= 0:
             return []
@@ -1444,6 +1588,17 @@ class MemoryPacketComposer:
         used = 0
         items: List[Dict[str, Any]] = []
         for result in results:
+            project: Dict[str, Any] = {}
+            selected_source_refs = list(result.get("source_refs") or [])
+            if str(result.get("type") or "") == "project_state":
+                project = self._project_fields_from_result(result)
+                if project and decision is not None:
+                    project = self._route_project_fields(project, decision)
+                    selected_source_refs = self._project_source_refs_for_decision(
+                        project,
+                        decision,
+                        fallback=selected_source_refs,
+                    )
             item = {
                 "id": result.get("id", ""),
                 "type": result.get("type", ""),
@@ -1451,11 +1606,11 @@ class MemoryPacketComposer:
                 "summary": result.get("summary", "")
                 or MemoryPacketComposer._truncate(result.get("body", ""), 280),
                 "status": result.get("status", ""),
-                "source_refs": list(result.get("source_refs") or [])[:8],
+                "source_refs": selected_source_refs[:8],
                 "file_path": self._safe_packet_file_path(result.get("file_path", "")),
                 "updated_at": result.get("updated_at", ""),
             }
-            total_source_refs = len(result.get("source_refs") or [])
+            total_source_refs = len(selected_source_refs)
             if total_source_refs > len(item["source_refs"]):
                 item["source_ref_count"] = total_source_refs
                 item["source_refs_truncated"] = True
@@ -1479,10 +1634,8 @@ class MemoryPacketComposer:
                 value = result.get(field)
                 if value not in (None, "", []):
                     item[field] = value
-            if item.get("type") == "project_state":
-                project = self._project_fields_from_result(result)
-                if project:
-                    item["project"] = project
+            if project:
+                item["project"] = project
             if item.get("type") == "candidate":
                 item["candidate_memory_type"] = result.get("subject", "")
                 item["candidate_decision"] = result.get("status", "")
@@ -1509,6 +1662,98 @@ class MemoryPacketComposer:
             items.append(item)
             used += estimate
         return items
+
+    @classmethod
+    def _route_project_fields(
+        cls, project: Dict[str, Any], decision: RoutingDecision
+    ) -> Dict[str, Any]:
+        fields = cls._project_fields_for_query(project, decision)
+        compact: Dict[str, Any] = {
+            "name": project.get("name", ""),
+            "status": project.get("status", ""),
+        }
+        for field_name in fields:
+            value = project.get(field_name)
+            if value not in (None, "", []):
+                compact[field_name] = value
+        evidence = project.get("field_evidence") or {}
+        if isinstance(evidence, dict):
+            selected_evidence = {
+                field_name: evidence[field_name]
+                for field_name in fields
+                if field_name in evidence
+            }
+            if selected_evidence:
+                compact["field_evidence"] = selected_evidence
+        if decision.route == "deep_recall" and project.get("why_it_matters"):
+            compact["why_it_matters"] = project["why_it_matters"]
+        return {
+            key: value for key, value in compact.items() if value not in (None, "", [])
+        }
+
+    @staticmethod
+    def _project_fields_for_query(
+        project: Dict[str, Any], decision: RoutingDecision
+    ) -> List[str]:
+        query = decision.search_query.lower()
+        if decision.route == "deep_recall":
+            return [
+                "goal",
+                "why_it_matters",
+                "current_state",
+                "decisions",
+                "open_questions",
+                "next_actions",
+                "related_entities",
+                "status",
+            ]
+        explicit: List[str] = []
+        if any(term in query for term in ("status", "paused", "active", "archived")):
+            explicit.append("status")
+        if any(term in query for term in ("next", "move", "before prefetch", "action")):
+            explicit.append("next_actions")
+        if any(term in query for term in ("goal", "building", "purpose", "why")):
+            explicit.extend(["goal", "why_it_matters"])
+        if "current state" in query:
+            explicit.append("current_state")
+        if any(term in query for term in ("decision", "decide", "decided")):
+            explicit.append("decisions")
+        if any(term in query for term in ("question", "blocker")):
+            explicit.append("open_questions")
+        if explicit:
+            return list(dict.fromkeys(explicit))
+        return [
+            "goal",
+            "why_it_matters",
+            "current_state",
+            "decisions",
+            "open_questions",
+            "next_actions",
+            "related_entities",
+            "status",
+        ]
+
+    @staticmethod
+    def _project_source_refs_for_decision(
+        project: Dict[str, Any],
+        decision: RoutingDecision,
+        *,
+        fallback: List[str],
+    ) -> List[str]:
+        evidence = project.get("field_evidence") or {}
+        if not isinstance(evidence, dict):
+            return fallback
+        selected: List[str] = []
+        fields = MemoryPacketComposer._project_fields_for_query(project, decision)
+        for field_name in fields:
+            for entry in evidence.get(field_name) or []:
+                if not isinstance(entry, dict):
+                    continue
+                for source_ref in entry.get("source_refs") or []:
+                    source_id = str(source_ref or "")
+                    if source_id and source_id not in selected:
+                        selected.append(source_id)
+        return selected or fallback
 
     @staticmethod
     def _project_fields_from_result(result: Dict[str, Any]) -> Dict[str, Any]:

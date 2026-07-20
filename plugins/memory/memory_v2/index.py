@@ -1073,11 +1073,24 @@ class MemoryV2Index:
         if not query_text:
             return []
         safe_limit = self._coerce_limit(limit)
-        fts_queries = self._fts_queries(query_text)
-        rows = []
+        route_key = str(route or "").strip().lower()
+        preserve_bm25 = route_key in {"deep_recall", "past_conversation_exact"}
+        fts_pools = (
+            [("bm25", fts_query) for fts_query in self._fts_queries(query_text)]
+            if preserve_bm25
+            else self._fts_pools(query_text)
+        )
         sql_limit = min(100, max(safe_limit * 4, safe_limit + 10))
+        fused: Dict[str, Dict[str, Any]] = {}
+        pool_weights = {
+            "strict": 1.4,
+            "field": 1.2,
+            "entity": 1.1,
+            "structured_alias": 1.0,
+            "relaxed": 0.8,
+        }
         with self._connect() as conn:
-            for fts_query in fts_queries:
+            for pool_priority, (pool_name, fts_query) in enumerate(fts_pools):
                 rows = conn.execute(
                     """
                     SELECT
@@ -1089,25 +1102,108 @@ class MemoryV2Index:
                     JOIN memories m ON m.id = memories_fts.id
                     WHERE memories_fts MATCH ?
                       AND (? OR m.type != 'raw_event')
-                    ORDER BY rank
+                    ORDER BY rank, m.id
                     LIMIT ?
                     """,
                     (fts_query, bool(include_raw_events), sql_limit),
                 ).fetchall()
-                # Preserve the old high-precision strict -> relaxed fallback
-                # behavior. Hybrid scoring reranks within the first plausible
-                # candidate pool rather than flooding precise queries with
-                # broad OR matches.
-                if rows:
+                for position, row in enumerate(rows, start=1):
+                    result = self._row_to_result(row)
+                    if not self._is_temporally_visible(result):
+                        continue
+                    item_id = str(result.get("id") or "")
+                    existing = fused.get(item_id)
+                    if existing is None:
+                        result["retrieval_pools"] = []
+                        result["rrf_score"] = 0.0
+                        result["bm25_pool_priority"] = pool_priority
+                        result["bm25_pool_rank"] = float(result.get("rank") or 0.0)
+                        fused[item_id] = result
+                        existing = result
+                    existing["retrieval_pools"].append(pool_name)
+                    existing["rrf_score"] += pool_weights.get(pool_name, 1.0) / (60.0 + position)
+                    existing["rank"] = min(
+                        float(existing.get("rank") or 0.0), float(result.get("rank") or 0.0)
+                    )
+                    if pool_priority < int(existing.get("bm25_pool_priority") or 0):
+                        existing["bm25_pool_priority"] = pool_priority
+                        existing["bm25_pool_rank"] = float(result.get("rank") or 0.0)
+                if preserve_bm25 and rows:
                     break
-        results = [result for result in (self._row_to_result(row) for row in rows) if self._is_temporally_visible(result)]
-        if str(route or "").strip().lower() in {"deep_recall", "past_conversation_exact"}:
+        results = self._enrich_source_signals(list(fused.values()))
+        if preserve_bm25:
             results = self._annotate_hybrid_scores(query_text, route=route, results=results)
+            results.sort(
+                key=lambda item: (
+                    int(item.get("bm25_pool_priority") or 0),
+                    float(item.get("bm25_pool_rank") or 0.0),
+                    str(item.get("id") or ""),
+                )
+            )
+            for item in results:
+                item["rank"] = float(item.get("bm25_pool_rank") or 0.0)
         else:
             results = self._hybrid_rank_results(query_text, route=route, results=results)
         results = results[:safe_limit]
         self.log_retrieval(query_text, route=route, retrieved_ids=[result["id"] for result in results])
         return results
+
+    def _enrich_source_signals(
+        self, results: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        source_ids = sorted(
+            {
+                str(source_id)
+                for result in results
+                for source_id in (result.get("source_refs") or [])
+                if str(source_id)
+            }
+        )
+        metadata: Dict[str, tuple[str, str]] = {}
+        if source_ids:
+            placeholders = ", ".join("?" for _ in source_ids)
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"SELECT id, type, observed_at FROM source_refs WHERE id IN ({placeholders})",
+                    source_ids,
+                ).fetchall()
+            metadata = {
+                str(row[0]): (str(row[1] or ""), str(row[2] or "")) for row in rows
+            }
+        quality_by_type = {
+            "manual": 1.0,
+            "message": 0.95,
+            "tool_result": 0.9,
+            "file": 0.85,
+            "session": 0.8,
+            "skill": 0.8,
+            "web": 0.7,
+            "memory": 0.6,
+        }
+        enriched: List[Dict[str, Any]] = []
+        for result in results:
+            item = dict(result)
+            refs = [str(value) for value in (item.get("source_refs") or []) if str(value)]
+            source_rows = [metadata[source_id] for source_id in refs if source_id in metadata]
+            if source_rows:
+                item["source_quality"] = sum(
+                    quality_by_type.get(source_type, 0.5)
+                    for source_type, _observed_at in source_rows
+                ) / len(source_rows)
+                observed = [observed_at for _source_type, observed_at in source_rows if observed_at]
+                if observed:
+                    item["evidence_at"] = max(
+                        observed, key=lambda value: self._timestamp_epoch(value)
+                    )
+            elif refs:
+                item["source_quality"] = 0.35
+            else:
+                item["source_quality"] = 0.0
+            item.setdefault(
+                "evidence_at", item.get("updated_at") or item.get("created_at") or ""
+            )
+            enriched.append(item)
+        return enriched
 
     @classmethod
     def _annotate_hybrid_scores(cls, query: str, *, route: str = "", results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1167,17 +1263,63 @@ class MemoryV2Index:
         phrase_boost = cls._phrase_boost(result, query_phrase)
         route_type_boost = cls._route_type_boost(str(route or ""), str(result.get("type") or ""))
         status_boost = cls._status_boost(str(result.get("status") or ""))
+        alias_terms = cls._structured_alias_terms(" ".join(query_terms))
+        structured_match = cls._structured_match_score(
+            result, query_terms=query_terms, alias_terms=alias_terms
+        )
+        evidence_time = min(
+            0.75,
+            max(0.0, cls._timestamp_epoch(result.get("evidence_at")) / 2_000_000_000.0)
+            * 0.75,
+        )
+        source_quality = cls._bounded_float(result.get("source_quality"), default=0.0) * 0.75
+        pool_fusion = min(3.0, max(0.0, float(result.get("rrf_score") or 0.0) * 30.0))
         confidence_boost = cls._bounded_float(result.get("confidence"), default=0.5) * 0.15
         importance_boost = cls._bounded_float(result.get("importance"), default=0.5) * 0.25
         return {
             "fts": round(fts_score, 6),
+            "pool_fusion": round(pool_fusion, 6),
             "token_overlap": round(token_overlap, 6),
             "phrase": round(phrase_boost, 6),
             "route_type_boost": round(route_type_boost, 6),
             "status": round(status_boost, 6),
+            "structured_match": round(structured_match, 6),
+            "evidence_time": round(evidence_time, 6),
+            "source_quality": round(source_quality, 6),
             "confidence": round(confidence_boost, 6),
             "importance": round(importance_boost, 6),
         }
+
+    @classmethod
+    def _structured_match_score(
+        cls,
+        result: Dict[str, Any],
+        *,
+        query_terms: List[str],
+        alias_terms: List[str],
+    ) -> float:
+        wanted = set(query_terms) | set(alias_terms)
+        if not wanted:
+            return 0.0
+        structured = " ".join(
+            [
+                str(result.get("title") or ""),
+                str(result.get("subject") or ""),
+                str(result.get("predicate") or ""),
+                " ".join(str(tag) for tag in (result.get("tags") or [])),
+            ]
+        )
+        matched = wanted & set(cls._content_terms(structured))
+        score = min(2.0, 2.0 * len(matched) / max(1, len(wanted)))
+        result_haystack = " ".join(
+            str(result.get(field) or "")
+            for field in ("title", "subject", "predicate", "value", "summary", "body")
+        )
+        result_slots = cls._semantic_slots(result_haystack)
+        query_slots = cls._semantic_slots(" ".join([*query_terms, *alias_terms]))
+        if result_slots & query_slots:
+            score += 1.25
+        return score
 
     @classmethod
     def _token_overlap_score(cls, result: Dict[str, Any], query_terms: List[str]) -> float:
@@ -1241,6 +1383,8 @@ class MemoryV2Index:
             "promoted": 0.3,
             "archived_only": 0.1,
             "archived": 0.0,
+            "resolved": -0.75,
+            "stale": -0.9,
             "superseded": -1.0,
             "rejected": -1.5,
         }.get(status, 0.0)
@@ -1254,6 +1398,8 @@ class MemoryV2Index:
             "promoted": 3,
             "archived_only": 4,
             "archived": 5,
+            "resolved": 6,
+            "stale": 6,
             "superseded": 6,
             "rejected": 7,
         }.get(status, 8)
@@ -1483,6 +1629,11 @@ class MemoryV2Index:
         return parsed
 
     @staticmethod
+    def _timestamp_epoch(value: Any) -> float:
+        parsed = MemoryV2Index._parse_time(value)
+        return parsed.timestamp() if parsed is not None else 0.0
+
+    @staticmethod
     def _redacted_query_for_log(query: str) -> str:
         sensitive_patterns = (
             r"(?i)password\s*(?:is|=|:)\s*\S+",
@@ -1530,6 +1681,135 @@ class MemoryV2Index:
         conn.execute("PRAGMA journal_mode=DELETE")
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
+
+    @classmethod
+    def _fts_pools(cls, query: str) -> List[tuple[str, str]]:
+        terms = cls._fts_terms(query)
+        if not terms:
+            return []
+        content_terms = [
+            term for term in terms if term.lower() not in cls._STOPWORDS
+        ]
+        if not content_terms:
+            return []
+        strict = " AND ".join(f'"{term}"' for term in terms)
+        relaxed = " OR ".join(f'"{term}"' for term in content_terms)
+        pools: List[tuple[str, str]] = [("strict", strict)]
+
+        field_terms = content_terms[:8]
+        field_query = " OR ".join(
+            f'title:"{term}" OR subject:"{term}" OR predicate:"{term}" OR tags:"{term}"'
+            for term in field_terms
+        )
+        if field_query:
+            pools.append(("field", field_query))
+
+        entity_terms = cls._entity_terms(query)
+        if entity_terms:
+            pools.append(
+                (
+                    "entity",
+                    " OR ".join(f'"{term}"' for term in entity_terms),
+                )
+            )
+
+        alias_terms = cls._structured_alias_terms(query)
+        if alias_terms:
+            pools.append(
+                (
+                    "structured_alias",
+                    " OR ".join(f'"{term}"' for term in alias_terms),
+                )
+            )
+        pools.append(("relaxed", relaxed))
+
+        seen_queries: set[str] = set()
+        unique: List[tuple[str, str]] = []
+        for name, fts_query in pools:
+            if fts_query and fts_query not in seen_queries:
+                unique.append((name, fts_query))
+                seen_queries.add(fts_query)
+        return unique
+
+    @classmethod
+    def _entity_terms(cls, query: str) -> List[str]:
+        excluded = {
+            "What",
+            "Where",
+            "When",
+            "Which",
+            "Who",
+            "Why",
+            "How",
+            "Did",
+            "Does",
+            "The",
+            "Project",
+        }
+        values: List[str] = []
+        for token in re.findall(r"\b[A-Za-z][A-Za-z0-9_.+-]{1,}\b", str(query or "")):
+            if token in excluded:
+                continue
+            if token.isupper() or token[:1].isupper():
+                lowered = token.lower()
+                if lowered not in cls._STOPWORDS and lowered not in values:
+                    values.append(lowered)
+        return values[:6]
+
+    _STRUCTURED_ALIAS_GROUPS: Dict[str, tuple[set[str], tuple[str, ...]]] = {
+        "voice": (
+            {"voice", "tts", "spoken", "speech", "narrator", "narration", "audio"},
+            ("tts", "voice", "spoken", "speech", "narrator"),
+        ),
+        "response_style": (
+            {"answer", "answers", "reply", "replies", "response", "respond", "tone", "preface", "prefaces"},
+            ("response", "style", "answers", "direct", "concise", "source", "grounded"),
+        ),
+        "notification": (
+            {"notification", "notifications", "digest", "alert", "alerts"},
+            ("notification", "digest", "preference"),
+        ),
+        "project_state": (
+            {"project", "resume", "continue", "left", "leave", "move", "prefetch", "goal", "blocker"},
+            ("project", "current", "state", "next", "action", "goal", "decision"),
+        ),
+        "environment": (
+            {"environment", "runtime", "machine", "deploy", "path", "directory", "setup"},
+            ("environment", "runtime", "deploy", "target", "path", "directory"),
+        ),
+        "procedure": (
+            {"workflow", "steps", "process", "procedure", "troubleshoot"},
+            ("procedure", "workflow", "steps", "runbook"),
+        ),
+        "preference": (
+            {"prefer", "prefers", "preference", "preferences", "liked", "likes"},
+            ("preference", "prefers", "current"),
+        ),
+        "history": (
+            {"stale", "old", "outdated", "superseded", "replaced", "contradiction"},
+            ("stale", "superseded", "current", "instead"),
+        ),
+    }
+
+    @classmethod
+    def _structured_alias_terms(cls, query: str) -> List[str]:
+        terms = set(cls._content_terms(query))
+        aliases: List[str] = []
+        for _slot, (triggers, expansions) in cls._STRUCTURED_ALIAS_GROUPS.items():
+            if terms & triggers:
+                for expansion in expansions:
+                    if expansion not in aliases:
+                        aliases.append(expansion)
+        return aliases[:16]
+
+    @classmethod
+    def _semantic_slots(cls, text: str) -> set[str]:
+        terms = set(cls._content_terms(text))
+        return {
+            slot
+            for slot, (triggers, _expansions) in cls._STRUCTURED_ALIAS_GROUPS.items()
+            if terms & triggers
+        }
 
     @staticmethod
     def _fts_queries(query: str) -> List[str]:

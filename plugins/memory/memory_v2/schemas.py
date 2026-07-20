@@ -517,6 +517,10 @@ class ProjectCard:
                 if entry["status"] not in {"current", "superseded", "resolved", "stale"}:
                     raise ValidationError("field_evidence.status is invalid")
                 entry["observed_at"] = str(entry.get("observed_at") or "")
+                try:
+                    entry["evidence_order"] = int(entry.get("evidence_order", -1))
+                except (TypeError, ValueError) as exc:
+                    raise ValidationError("field_evidence.evidence_order must be an integer") from exc
                 entry["source_refs"] = sorted(set(_list_of_strings(entry.get("source_refs"))))
                 candidate_id = str(entry.get("candidate_id") or "").strip()
                 if candidate_id:
@@ -528,6 +532,7 @@ class ProjectCard:
                 entries,
                 key=lambda item: (
                     str(item.get("observed_at") or ""),
+                    int(item.get("evidence_order", -1)),
                     str(item.get("candidate_id") or ""),
                     str(item.get("value") or ""),
                 ),

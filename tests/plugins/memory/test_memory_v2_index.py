@@ -596,6 +596,126 @@ def test_hybrid_search_preserves_bm25_order_for_deep_and_exact_routes(tmp_path):
     assert all("score_components" in result for result in exact_results + deep_results)
 
 
+def test_search_fuses_strict_and_relaxed_pools_instead_of_stopping_early(tmp_path):
+    store = _store(tmp_path)
+    index = MemoryV2Index(store.base_dir / "indexes" / "memory.sqlite")
+    index.initialize()
+    index.index_record(
+        id="fact_strict_decoy",
+        type="fact",
+        title="Atlas notification digest current",
+        body="Atlas notification digest current is a generic test phrase.",
+        summary="Generic strict-match decoy.",
+        status="active",
+        source_refs=["source_decoy"],
+    )
+    index.index_memory_item(
+        MemoryItem(
+            id="pref_relaxed_target",
+            type="preference",
+            subject="Atlas notifications",
+            predicate="prefers_notification_digest",
+            value="Atlas notification preference is afternoon digest.",
+            summary="Atlas uses the afternoon digest.",
+            status="active",
+            updated_at="2026-06-01T00:00:00Z",
+            source_refs=["source_target"],
+        )
+    )
+
+    results = index.search(
+        "Atlas notification digest current",
+        route="preference_recall",
+        limit=5,
+    )
+
+    assert {result["id"] for result in results} >= {
+        "fact_strict_decoy",
+        "pref_relaxed_target",
+    }
+    assert results[0]["id"] == "pref_relaxed_target"
+    assert "relaxed" in results[0]["retrieval_pools"]
+    assert results[0]["score_components"]["pool_fusion"] > 0
+
+
+def test_structured_alias_pool_recalls_unseen_voice_paraphrase(tmp_path):
+    store = _store(tmp_path)
+    index = MemoryV2Index(store.base_dir / "indexes" / "memory.sqlite")
+    index.initialize()
+    index.index_memory_item(
+        MemoryItem(
+            id="pref_spoken_voice",
+            type="preference",
+            subject="user TTS voice",
+            predicate="prefers_tts_voice",
+            value="Use en-US-AndrewNeural for a deeper confident male voice.",
+            summary="The current TTS voice is en-US-AndrewNeural.",
+            source_refs=["source_voice"],
+        )
+    )
+
+    results = index.search(
+        "Which narrator should read spoken replies?",
+        route="preference_recall",
+        limit=5,
+    )
+
+    assert results[0]["id"] == "pref_spoken_voice"
+    assert "structured_alias" in results[0]["retrieval_pools"]
+    assert results[0]["score_components"]["structured_match"] > 0
+
+
+def test_multi_pool_search_order_is_insertion_invariant(tmp_path):
+    records = [
+        MemoryItem(
+            id="pref_voice_a",
+            type="preference",
+            subject="user TTS voice",
+            predicate="prefers_tts_voice",
+            value="Use voice alpha for spoken replies.",
+            updated_at="2025-01-01T00:00:00Z",
+            source_refs=["source_a"],
+        ),
+        MemoryItem(
+            id="pref_voice_b",
+            type="preference",
+            subject="user TTS voice",
+            predicate="prefers_tts_voice",
+            value="Use voice beta for spoken replies.",
+            updated_at="2026-01-01T00:00:00Z",
+            source_refs=["source_b"],
+        ),
+        MemoryItem(
+            id="pref_style_c",
+            type="preference",
+            subject="user response style",
+            predicate="prefers_response_style",
+            value="Use concise replies.",
+            source_refs=["source_c"],
+        ),
+    ]
+    orders = []
+    for name, values in (("forward", records), ("reverse", list(reversed(records)))):
+        store = _store(tmp_path / name)
+        index = MemoryV2Index(store.base_dir / "indexes" / "memory.sqlite")
+        index.initialize()
+        for record in values:
+            index.index_memory_item(record)
+        results = index.search(
+            "Which narrator should read spoken replies?",
+            route="preference_recall",
+            limit=5,
+        )
+        orders.append(
+            [
+                (result["id"], result["hybrid_score"], result["retrieval_pools"])
+                for result in results
+            ]
+        )
+
+    assert orders[0] == orders[1]
+
+
 def test_rebuild_from_store_skips_raw_events_missing_ids(tmp_path):
     store = _store(tmp_path)
     store._append_jsonl(store.raw_events_path, {"type": "turn", "user_content": "legacy missing id"})

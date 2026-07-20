@@ -220,3 +220,125 @@ def test_project_lifecycle_is_evidence_time_ordered_and_restart_invariant(tmp_pa
     assert action_records[0]["status"] == "resolved"
     assert chronological_packet.items[0]["project"].get("next_actions", []) == []
     assert chronological_packet.items == shuffled_packet.items
+
+
+def test_current_view_collapses_same_slot_by_source_evidence_time(tmp_path):
+    store, index = _store_and_index(tmp_path)
+    for source_id, observed_at in (
+        ("source_digest_old", "2025-01-01T00:00:00Z"),
+        ("source_digest_current", "2026-01-01T00:00:00Z"),
+    ):
+        store.write_source_ref(
+            SourceRef(
+                id=source_id,
+                type="message",
+                uri=f"memory://messages/{source_id}",
+                observed_at=observed_at,
+            )
+        )
+    for item in (
+        MemoryItem(
+            id="pref_digest_old_active",
+            type="preference",
+            subject="user",
+            predicate="prefers",
+            value="Chronos notification preference is now morning digest.",
+            summary="Chronos notification preference is now morning digest.",
+            status="active",
+            source_refs=["source_digest_old"],
+        ),
+        MemoryItem(
+            id="pref_digest_current_active",
+            type="preference",
+            subject="user",
+            predicate="prefers",
+            value="Chronos notification preference is afternoon digest.",
+            summary="Chronos notification preference is afternoon digest.",
+            status="active",
+            source_refs=["source_digest_current"],
+        ),
+    ):
+        store.write_memory_item(item)
+    index.rebuild_from_store(store)
+
+    current = MemoryPacketComposer(index).compose(
+        "What is the current Chronos notification digest?"
+    )
+    history = MemoryPacketComposer(index).compose(
+        "Which Chronos notification digest is stale or superseded?"
+    )
+
+    assert [item["id"] for item in current.items] == ["pref_digest_current_active"]
+    assert {item["id"] for item in history.items} == {
+        "pref_digest_old_active",
+        "pref_digest_current_active",
+    }
+
+
+def test_project_packet_selects_route_critical_fields_and_provenance(tmp_path):
+    store, index = _store_and_index(tmp_path)
+    card = ProjectCard(
+        id="Project Atlas",
+        name="Project Atlas",
+        goal="Build the source-grounded eval harness.",
+        current_state="Paraphrase and privacy checks are current.",
+        next_actions=["Wire strict acceptance before prefetch."],
+        source_refs=["source_goal", "source_state", "source_next", "source_old_note"],
+        field_evidence={
+            "goal": [
+                {
+                    "value": "Build the source-grounded eval harness.",
+                    "status": "current",
+                    "observed_at": "2026-01-01T00:00:00Z",
+                    "source_refs": ["source_goal"],
+                }
+            ],
+            "current_state": [
+                {
+                    "value": "Old source note.",
+                    "status": "superseded",
+                    "observed_at": "2026-01-02T00:00:00Z",
+                    "source_refs": ["source_old_note"],
+                },
+                {
+                    "value": "Paraphrase and privacy checks are current.",
+                    "status": "current",
+                    "observed_at": "2026-03-01T00:00:00Z",
+                    "source_refs": ["source_state"],
+                },
+            ],
+            "next_actions": [
+                {
+                    "value": "Wire strict acceptance before prefetch.",
+                    "status": "current",
+                    "observed_at": "2026-04-01T00:00:00Z",
+                    "source_refs": ["source_next"],
+                }
+            ],
+        },
+    )
+    store.write_project_card(card)
+    index.rebuild_from_store(store)
+
+    continuity = MemoryPacketComposer(index).compose(
+        "Where did we leave off on Project Atlas?"
+    )
+    goal = MemoryPacketComposer(index).compose(
+        "Which project is building the source-grounded eval harness?"
+    )
+    next_action = MemoryPacketComposer(index).compose(
+        "What is the next move before prefetch for Project Atlas?"
+    )
+
+    assert continuity.items[0]["source_refs"] == [
+        "source_goal",
+        "source_state",
+        "source_next",
+    ]
+    assert "source_old_note" not in continuity.items[0]["source_refs"]
+    assert continuity.items[0]["project"]["current_state"]
+    assert continuity.items[0]["project"]["next_actions"]
+    assert goal.items[0]["source_refs"] == ["source_goal"]
+    assert set(goal.items[0]["project"]) >= {"name", "goal"}
+    assert next_action.items[0]["source_refs"] == ["source_next"]
+    assert next_action.items[0]["project"]["next_actions"]
