@@ -79,7 +79,7 @@ Validated model claims are capped at confidence `0.82`, marked `extraction_metho
 Focused coverage:
 
 ```bash
-venv/bin/python -m pytest \
+scripts/run_tests.sh \
   tests/plugins/memory/test_memory_v2_p1_extraction.py \
   tests/plugins/memory/test_memory_v2_extraction.py \
   tests/plugins/memory/test_memory_v2_extraction_rollout.py \

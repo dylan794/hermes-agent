@@ -249,18 +249,29 @@ def test_direct_provider_mutation_tools_require_review_plan_action_fingerprint(t
     assert "review plan" in bypass["error"]
     assert provider.store.list_operation_records() == []
 
+    authorized_args = {
+        "candidate_id": "cand_direct",
+        "reason": "reviewed rejection",
+        "plan_id": plan["plan_id"],
+        "action_id": action["action_id"],
+        "candidate_fingerprint": action["candidate_fingerprint"],
+        "confirm": CONFIRM_REVIEW_APPLY,
+    }
+    unauthorized = json.loads(
+        provider.handle_tool_call("memory_v2_reject", authorized_args)
+    )
+    assert unauthorized["success"] is False
+    assert "trusted host/operator authority" in unauthorized["error"]
+    assert provider.store.list_candidates()[0].gate_decision.value == "pending"
+    assert provider.store.list_operation_records() == []
+
+    provider._mutation_authorizer = lambda scope, context: (
+        scope == "review_apply"
+        and context["session_id"] == "session-safety"
+        and context["provider"] == "memory_v2"
+    )
     applied = json.loads(
-        provider.handle_tool_call(
-            "memory_v2_reject",
-            {
-                "candidate_id": "cand_direct",
-                "reason": "reviewed rejection",
-                "plan_id": plan["plan_id"],
-                "action_id": action["action_id"],
-                "candidate_fingerprint": action["candidate_fingerprint"],
-                "confirm": CONFIRM_REVIEW_APPLY,
-            },
-        )
+        provider.handle_tool_call("memory_v2_reject", authorized_args)
     )
     assert applied["success"] is True
     assert provider.store.list_candidates()[0].gate_decision.value == "rejected"

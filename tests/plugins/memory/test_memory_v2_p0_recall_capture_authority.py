@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from plugins.memory.memory_v2 import MemoryV2Provider
@@ -158,6 +159,48 @@ def test_manual_source_sidecar_alone_cannot_ground_promotion(tmp_path):
     assert result.success is False
     assert "canonical" in result.error.lower() or "source" in result.error.lower()
     assert provider.store.list_memory_items() == []
+
+
+@pytest.mark.parametrize(
+    "observed_at",
+    ["", "not-an-iso-timestamp", "2026-07-20T12:00:00", "2020-01-01T00:00:00Z"],
+)
+def test_promotion_rejects_missing_invalid_or_ungrounded_evidence_timestamp(
+    tmp_path,
+    observed_at,
+):
+    provider = _provider(tmp_path)
+    event = provider.store.append_raw_event(
+        {
+            "type": "turn",
+            "session_id": "provider-session",
+            "user_content": "Remember that provenance timestamps are mandatory.",
+            "created_at": "2026-07-20T19:00:00Z",
+        }
+    )
+    source = provider.store.read_source_ref(event["id"])
+    assert source is not None
+    source.observed_at = observed_at
+    provider.store.write_source_ref(source)
+    provider.store.append_candidate(
+        CandidateMemory(
+            id="cand_invalid_evidence_time",
+            type=MemoryType.FACT,
+            claim="Provenance timestamps are mandatory.",
+            proposed_destination="memory_item",
+            confidence=0.9,
+            source_refs=[event["id"]],
+        )
+    )
+
+    result = MemoryOperationService(provider.store, provider.index).promote_candidate(
+        "cand_invalid_evidence_time"
+    )
+
+    assert result.success is False
+    assert "valid evidence timestamps" in result.error
+    assert provider.store.list_memory_items() == []
+    assert provider.store.list_candidates()[0].gate_decision.value == "pending"
 
 
 def test_model_mutation_tools_are_review_bound_and_unplanned_paths_are_hidden(tmp_path):

@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import sqlite3
 
+import pytest
+
 from plugins.memory.memory_v2.index import MemoryV2Index
+from plugins.memory.memory_v2.schemas import ValidationError
 from plugins.memory.memory_v2.store import MemoryV2Store
 
 
@@ -179,6 +182,88 @@ def test_rebuild_raw_archive_index_streams_jsonl_offsets_and_updates_manifest(tm
     assert manifest["indexed_event_count"] == 2
     assert manifest["last_indexed_record_sha256"] == second["record_sha256"]
     assert manifest["raw_index_schema_version"] == 1
+
+
+def test_raw_archive_rebuilds_refuse_tampered_canonical_jsonl_and_preserve_live_index(tmp_path):
+    store = _store(tmp_path)
+    event = store.append_raw_event(
+        {"type": "turn", "session_id": "integrity", "user_content": "original archive integrity marker"}
+    )
+    index = _index(store)
+    index.rebuild_from_store(store)
+
+    record = json.loads(store.raw_events_path.read_text(encoding="utf-8"))
+    record["user_content"] = "tampered archive integrity marker"
+    store.raw_events_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    for rebuild in (index.rebuild_raw_archive_index, index.rebuild_from_store):
+        with pytest.raises(ValidationError, match="integrity verification failed"):
+            rebuild(store)
+        assert store.read_raw_archive_manifest()["derived_index_status"] == "integrity_failed"
+        assert index.raw_event_count() == 1
+        assert index.raw_event_metadata(event["id"])["record_sha256"] == event["record_sha256"]
+
+
+def test_raw_archive_rebuild_rolls_back_partial_transaction_on_indexing_error(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    first = store.append_raw_event(
+        {"type": "turn", "session_id": "rollback", "user_content": "first preserved raw marker"}
+    )
+    second = store.append_raw_event(
+        {"type": "turn", "session_id": "rollback", "user_content": "second preserved raw marker"}
+    )
+    index = _index(store)
+    index.rebuild_raw_archive_index(store)
+    original_index_event = index.index_raw_archive_event
+    calls = 0
+
+    def fail_on_second_event(event, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("injected raw rebuild failure")
+        return original_index_event(event, **kwargs)
+
+    monkeypatch.setattr(index, "index_raw_archive_event", fail_on_second_event)
+
+    with pytest.raises(RuntimeError, match="injected raw rebuild failure"):
+        index.rebuild_raw_archive_index(store)
+
+    assert index.raw_event_count() == 2
+    assert index.raw_event_metadata(first["id"])["record_sha256"] == first["record_sha256"]
+    assert index.raw_event_metadata(second["id"])["record_sha256"] == second["record_sha256"]
+    assert store.read_raw_archive_manifest()["derived_index_status"] == "stale"
+
+
+def test_raw_archive_date_filters_compare_iso_offsets_as_instants(tmp_path):
+    store = _store(tmp_path)
+    earlier = store.append_raw_event(
+        {
+            "type": "turn",
+            "session_id": "date-filter",
+            "user_content": "earlier instant",
+            "created_at": "2026-01-01T01:00:00+02:00",
+        }
+    )
+    later = store.append_raw_event(
+        {
+            "type": "turn",
+            "session_id": "date-filter",
+            "user_content": "later instant",
+            "created_at": "2025-12-31T23:30:00Z",
+        }
+    )
+    index = _index(store)
+    index.rebuild_raw_archive_index(store)
+
+    boundary = "2026-01-01T00:15:00+01:00"
+    after = index.search_raw_archive(session_id="date-filter", created_after=boundary, limit=10)
+    before = index.search_raw_archive(session_id="date-filter", created_before=boundary, limit=10)
+
+    assert [item["id"] for item in after] == [later["id"]]
+    assert [item["id"] for item in before] == [earlier["id"]]
+    with pytest.raises(ValidationError, match="created_after"):
+        index.search_raw_archive(created_after="not-a-timestamp")
 
 
 def test_raw_fts_schema_mismatch_marks_derived_content_needing_rebuild(tmp_path):

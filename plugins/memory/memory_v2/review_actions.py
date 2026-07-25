@@ -90,7 +90,9 @@ class MemoryReviewPlanner:
                 "requires_action_ids": True,
                 "requires_confirm": True,
                 "confirm_value": CONFIRM_REVIEW_APPLY,
-                "model_apply_operations": ["reject_candidate"],
+                "model_apply_operations": [],
+                "host_authorized_apply_operations": ["reject_candidate"],
+                "requires_external_operator_authority": True,
                 "promotion_authority": "external_operator_only",
             },
         }

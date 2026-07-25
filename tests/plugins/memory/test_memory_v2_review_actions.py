@@ -8,7 +8,7 @@ from plugins.memory.memory_v2 import MemoryV2Provider
 from plugins.memory.memory_v2.schemas import CandidateMemory, MemoryItem
 
 
-def _provider(tmp_path):
+def _provider(tmp_path, *, mutation_authorizer=None):
     (tmp_path / "config.yaml").write_text(
         """
 memory_v2:
@@ -22,7 +22,12 @@ memory_v2:
         encoding="utf-8",
     )
     provider = MemoryV2Provider()
-    provider.initialize("session-review-actions", hermes_home=str(tmp_path), platform="cli")
+    provider.initialize(
+        "session-review-actions",
+        hermes_home=str(tmp_path),
+        platform="cli",
+        memory_v2_mutation_authorizer=mutation_authorizer,
+    )
     return provider
 
 
@@ -86,6 +91,9 @@ def test_review_plan_is_dry_run_stable_and_blocks_risky_candidates(tmp_path):
     assert first["summary"] == {"proposed_promotions": 1, "proposed_rejections": 1, "blocked": 2}
     assert [action["candidate_id"] for action in first["actions"]] == ["cand_safe", "cand_ephemeral"]
     assert {blocked["candidate_id"] for blocked in first["blocked"]} == {"cand_missing", "cand_skill"}
+    assert first["apply_contract"]["model_apply_operations"] == []
+    assert first["apply_contract"]["host_authorized_apply_operations"] == ["reject_candidate"]
+    assert first["apply_contract"]["requires_external_operator_authority"] is True
     assert [candidate.to_dict() for candidate in provider.store.list_candidates()] == before_candidates
     assert provider.store.list_operation_records() == []
 
@@ -141,7 +149,13 @@ def test_review_apply_dry_run_validates_without_mutating(tmp_path):
 
 
 def test_review_apply_rejects_promotion_actions_but_allows_safe_rejection_actions_with_audit_records(tmp_path):
-    provider = _provider(tmp_path)
+    authorization_calls = []
+
+    def authorize(scope, context):
+        authorization_calls.append((scope, context))
+        return scope == "review_apply" and context["platform"] == "cli"
+
+    provider = _provider(tmp_path, mutation_authorizer=authorize)
     _seed_review_candidates(provider)
     plan = json.loads(provider.handle_tool_call("memory_v2_review_plan", {}))
 
@@ -169,6 +183,54 @@ def test_review_apply_rejects_promotion_actions_but_allows_safe_rejection_action
     operation_types = [record["type"] for record in provider.store.list_operation_records()]
     assert operation_types == ["reject_candidate", "reject_candidate"]
     assert [record["status"] for record in provider.store.list_operation_records()] == ["prepared", "committed"]
+    assert authorization_calls == [
+        (
+            "review_apply",
+            {
+                "session_id": "session-review-actions",
+                "platform": "cli",
+                "provider": "memory_v2",
+            },
+        )
+    ]
+
+
+def test_review_apply_mutation_fails_closed_without_working_host_authority(tmp_path):
+    provider = _provider(tmp_path)
+    _seed_review_candidates(provider)
+    plan = json.loads(
+        provider.handle_tool_call(
+            "memory_v2_review_plan",
+            {"candidate_ids": ["cand_ephemeral"]},
+        )
+    )
+    args = {
+        "plan_id": plan["plan_id"],
+        "candidate_ids": ["cand_ephemeral"],
+        "action_ids": [plan["actions"][0]["action_id"]],
+        "confirm": "APPLY_MEMORY_V2_REVIEW_PLAN",
+        "dry_run": False,
+    }
+
+    missing = json.loads(provider.handle_tool_call("memory_v2_review_apply", args))
+
+    def broken_authorizer(scope, context):
+        raise RuntimeError("operator service unavailable")
+
+    provider._mutation_authorizer = broken_authorizer
+    errored = json.loads(provider.handle_tool_call("memory_v2_review_apply", args))
+
+    for payload in (missing, errored):
+        assert payload["success"] is False
+        assert "trusted host/operator authority" in payload["error"]
+    ephemeral = next(
+        candidate
+        for candidate in provider.store.list_candidates()
+        if candidate.id == "cand_ephemeral"
+    )
+    assert ephemeral.gate_decision.value == "pending"
+    assert provider.store.list_rejected_candidates() == []
+    assert provider.store.list_operation_records() == []
 
 
 def test_review_apply_rejects_stale_plan_when_candidate_changed(tmp_path):
@@ -252,7 +314,10 @@ def test_review_plan_blocks_ephemeral_candidates_with_hard_risk_flags(tmp_path):
 
 
 def test_review_apply_accepts_same_candidate_filter_used_for_plan(tmp_path):
-    provider = _provider(tmp_path)
+    provider = _provider(
+        tmp_path,
+        mutation_authorizer=lambda scope, context: scope == "review_apply",
+    )
     _seed_review_candidates(provider)
     plan = json.loads(provider.handle_tool_call("memory_v2_review_plan", {"candidate_ids": ["cand_safe"]}))
 

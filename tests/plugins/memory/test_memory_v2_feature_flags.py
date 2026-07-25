@@ -22,11 +22,21 @@ def _write_config(tmp_path, memory_v2: dict) -> None:
     )
 
 
-def _provider(tmp_path, memory_v2: dict | None = None) -> MemoryV2Provider:
+def _provider(
+    tmp_path,
+    memory_v2: dict | None = None,
+    *,
+    mutation_authorizer=None,
+) -> MemoryV2Provider:
     if memory_v2 is not None:
         _write_config(tmp_path, memory_v2)
     provider = MemoryV2Provider()
-    provider.initialize("session-flags", hermes_home=str(tmp_path), platform="cli")
+    provider.initialize(
+        "session-flags",
+        hermes_home=str(tmp_path),
+        platform="cli",
+        memory_v2_mutation_authorizer=mutation_authorizer,
+    )
     return provider
 
 
@@ -401,7 +411,11 @@ def test_dream_cycle_direct_api_safe_rejection_canary_requires_review_apply_allo
 
 
 def test_review_apply_direct_call_defaults_to_dry_run_until_explicit_false(tmp_path) -> None:
-    provider = _provider(tmp_path, {"review_apply": {"enabled": True}})
+    provider = _provider(
+        tmp_path,
+        {"review_apply": {"enabled": True}},
+        mutation_authorizer=lambda scope, context: scope == "review_apply",
+    )
     event = provider.store.append_raw_event(
         {
             "type": "turn",

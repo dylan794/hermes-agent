@@ -7,6 +7,7 @@ import re
 import shutil
 import sqlite3
 import time
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -117,7 +118,7 @@ class RawFTSBaseline:
 
     def _initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with closing(sqlite3.connect(str(self.db_path))) as conn, conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS events (
@@ -131,7 +132,7 @@ class RawFTSBaseline:
             )
 
     def ingest(self, events: list[EvalEvent]) -> None:
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with closing(sqlite3.connect(str(self.db_path))) as conn, conn:
             conn.execute("DELETE FROM events")
             conn.execute("DELETE FROM events_fts")
             for event in events:
@@ -146,7 +147,7 @@ class RawFTSBaseline:
         start = time.perf_counter()
         rows = []
         fts_query = _fts_query(query.text)
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with closing(sqlite3.connect(str(self.db_path))) as conn:
             if fts_query:
                 rows = conn.execute(
                     """

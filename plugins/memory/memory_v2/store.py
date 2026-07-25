@@ -15,13 +15,13 @@ import threading
 import time
 import uuid
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-import fcntl
-
 import yaml
 
+from .file_lock import FileLockUnavailableError, release_exclusive, try_acquire_exclusive
 from .redaction import redact_data, redact_text, redaction_metadata
 from .schemas import (
     ArtifactRecord,
@@ -88,7 +88,18 @@ class MemoryV2Store:
     """Small local file store rooted at ``{hermes_home}/memory_v2``."""
 
     def __init__(self, base_dir: str | Path) -> None:
-        self.base_dir = Path(base_dir).expanduser().resolve()
+        requested_base = Path(base_dir).expanduser()
+        if not requested_base.is_absolute():
+            requested_base = Path.cwd() / requested_base
+        self._profile_root = requested_base.parent.resolve()
+        resolved_base = requested_base.resolve()
+        try:
+            resolved_base.relative_to(self._profile_root)
+        except ValueError as exc:
+            raise ValidationError(
+                "Memory v2 base_dir resolves outside its profile; refusing a symlink or junction escape"
+            ) from exc
+        self.base_dir = resolved_base
         self._raw_event_lock = threading.Lock()
 
     @property
@@ -174,6 +185,7 @@ class MemoryV2Store:
     def initialize(self) -> None:
         """Create the Memory v2 profile-scoped directory tree and seed files."""
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self._assert_profile_scoped_base_dir()
         for rel in MEMORY_V2_DIRS:
             (self.base_dir / rel).mkdir(parents=True, exist_ok=True)
 
@@ -214,6 +226,15 @@ class MemoryV2Store:
         # created by the layout above; the JSONL file is created lazily by the
         # first audited operation.
 
+    def _assert_profile_scoped_base_dir(self) -> None:
+        """Reject a base directory redirected outside its profile root."""
+        try:
+            self.base_dir.resolve().relative_to(self._profile_root)
+        except ValueError as exc:
+            raise ValidationError(
+                "Memory v2 base_dir resolves outside its profile; refusing a symlink or junction escape"
+            ) from exc
+
     @property
     def profile_lock_path(self) -> Path:
         return self.base_dir / "audit" / "profile.lock"
@@ -230,16 +251,21 @@ class MemoryV2Store:
         with self.profile_lock_path.open("a+b") as fh:
             while True:
                 try:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError as exc:
-                    if time.monotonic() >= deadline:
-                        raise ValidationError("Memory v2 profile lock timeout; refusing to mutate without exclusive lock") from exc
-                    time.sleep(0.01)
+                    if try_acquire_exclusive(fh):
+                        break
+                except FileLockUnavailableError as exc:
+                    raise ValidationError(
+                        "Memory v2 profile lock unavailable; refusing to mutate without an exclusive lock"
+                    ) from exc
+                if time.monotonic() >= deadline:
+                    raise ValidationError(
+                        "Memory v2 profile lock timeout; refusing to mutate without exclusive lock"
+                    )
+                time.sleep(0.01)
             try:
                 yield
             finally:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                release_exclusive(fh)
 
     def append_raw_event(self, event: Dict[str, Any], *, lock_timeout: float = _DEFAULT_PROFILE_LOCK_TIMEOUT_SECONDS) -> Dict[str, Any]:
         """Append a redacted, tamper-evident raw event to ``inbox/raw_events.jsonl``.
@@ -253,6 +279,7 @@ class MemoryV2Store:
             raise ValidationError("raw event must be a JSON object")
         with self.profile_lock(timeout=lock_timeout), self._raw_event_lock:
             previous = self._last_raw_event_for_chain()
+            self._require_appendable_raw_archive(previous)
             payload = self._normalize_raw_event(event, previous=previous)
             byte_offset, byte_length = self._append_jsonl(self.raw_events_path, payload, fsync=True)
             self.write_source_ref(self._source_ref_from_raw_event(payload))
@@ -746,6 +773,21 @@ class MemoryV2Store:
                 created_at = str(event.get("created_at") or "")
                 first_created_at = first_created_at or created_at
                 last_created_at = created_at or last_created_at
+                for timestamp_field in ("created_at", "observed_at"):
+                    try:
+                        self._validated_evidence_timestamp(
+                            event.get(timestamp_field),
+                            field_name=timestamp_field,
+                        )
+                    except ValidationError:
+                        issues.append(
+                            {
+                                "code": "raw_event_invalid_evidence_timestamp",
+                                "line": line_no,
+                                "event_id": event_id,
+                                "field": timestamp_field,
+                            }
+                        )
                 stored_record_hash = str(event.get("record_sha256") or "")
                 stored_previous_hash = str(event.get("previous_record_sha256") or "")
                 if not stored_record_hash:
@@ -1186,9 +1228,24 @@ class MemoryV2Store:
                 raise ValidationError("raw archive index status is unknown; rebuild Memory v2 indexes before using bounded raw archive APIs")
             return
         status = str(manifest.get("derived_index_status") or "")
-        if status and status != "ok":
+        canonical_status = str(manifest.get("status") or "")
+        if canonical_status != "ok":
+            raise ValidationError(
+                "raw archive integrity is degraded or unknown; refusing bounded raw archive retrieval"
+            )
+        if status != "ok":
             raise ValidationError("raw archive index is stale; rebuild Memory v2 indexes before using bounded raw archive APIs")
         event_count = int(manifest.get("event_count") or 0)
+        verified_count = int(manifest.get("verified_event_count") or 0)
+        if verified_count != event_count:
+            raise ValidationError(
+                "raw archive verification count does not match manifest; refusing bounded raw archive retrieval"
+            )
+        actual_byte_size = self.raw_events_path.stat().st_size if self.raw_events_path.exists() else 0
+        if int(manifest.get("byte_size") or 0) != actual_byte_size:
+            raise ValidationError(
+                "raw archive byte size does not match manifest; rebuild Memory v2 indexes before retrieval"
+            )
         indexed_count = int(manifest.get("indexed_event_count") or 0)
         if indexed_count != event_count:
             raise ValidationError("raw archive index count does not match manifest; rebuild Memory v2 indexes before using bounded raw archive APIs")
@@ -1221,13 +1278,62 @@ class MemoryV2Store:
         if str(event.get("id") or "") != str(metadata.get("id") or ""):
             raise ValidationError("raw archive index byte slice id mismatch; rebuild Memory v2 indexes")
         indexed_hash = str(metadata.get("record_sha256") or "")
-        if indexed_hash and str(event.get("record_sha256") or "") != indexed_hash:
+        stored_content_hash = str(event.get("content_sha256") or "")
+        stored_record_hash = str(event.get("record_sha256") or "")
+        if not stored_content_hash or stored_content_hash != self._raw_event_content_hash(event):
+            raise ValidationError("raw archive event content hash mismatch; refusing tampered evidence")
+        if not stored_record_hash or stored_record_hash != self._raw_event_record_hash(event):
+            raise ValidationError("raw archive event record hash mismatch; refusing tampered evidence")
+        if not indexed_hash or stored_record_hash != indexed_hash:
             raise ValidationError("raw archive index record hash mismatch; rebuild Memory v2 indexes")
+        indexed_content_hash = str(metadata.get("content_sha256") or "")
+        if not indexed_content_hash or stored_content_hash != indexed_content_hash:
+            raise ValidationError("raw archive index content hash mismatch; rebuild Memory v2 indexes")
+        for field_name in ("previous_record_sha256", "chain_index"):
+            if event.get(field_name) != metadata.get(field_name):
+                raise ValidationError(
+                    f"raw archive index {field_name} mismatch; rebuild Memory v2 indexes"
+                )
+        self._validated_evidence_timestamp(event.get("created_at"), field_name="created_at")
+        self._validated_evidence_timestamp(event.get("observed_at"), field_name="observed_at")
         return event
 
     def _last_raw_event_for_chain(self) -> Dict[str, Any] | None:
         events = self._read_jsonl_tail(self.raw_events_path, 1)
         return events[-1] if events else None
+
+    def _require_appendable_raw_archive(self, previous: Dict[str, Any] | None) -> None:
+        """Fail closed when the existing canonical archive is known inconsistent."""
+        raw_has_events = self.raw_events_path.exists() and self.raw_events_path.stat().st_size > 0
+        if not raw_has_events:
+            if previous is not None:
+                raise ValidationError("raw archive tail exists but canonical archive is empty")
+            return
+        if previous is None:
+            raise ValidationError("raw archive is nonempty but has no valid tail event")
+        try:
+            manifest = self._read_raw_archive_manifest_if_present()
+        except (OSError, TypeError, ValueError, yaml.YAMLError):
+            manifest = {}
+        if not manifest:
+            manifest = self.rebuild_raw_archive_manifest()
+        if str(manifest.get("status") or "") != "ok":
+            raise ValidationError(
+                "raw archive integrity is degraded or unknown; refusing to extend the evidence chain"
+            )
+        stored_content_hash = str(previous.get("content_sha256") or "")
+        stored_record_hash = str(previous.get("record_sha256") or "")
+        if not stored_content_hash or stored_content_hash != self._raw_event_content_hash(previous):
+            raise ValidationError("raw archive tail content hash mismatch; refusing to extend a tampered archive")
+        if not stored_record_hash or stored_record_hash != self._raw_event_record_hash(previous):
+            raise ValidationError("raw archive tail record hash mismatch; refusing to extend a tampered archive")
+        if stored_record_hash != str(manifest.get("last_record_sha256") or ""):
+            raise ValidationError("raw archive tail does not match its manifest; refusing to append")
+        expected_count = int(previous.get("chain_index") or 0) + 1
+        if int(manifest.get("event_count") or 0) != expected_count:
+            raise ValidationError("raw archive chain length does not match its manifest; refusing to append")
+        self._validated_evidence_timestamp(previous.get("created_at"), field_name="created_at")
+        self._validated_evidence_timestamp(previous.get("observed_at"), field_name="observed_at")
 
     def _normalize_raw_event(
         self, event: Dict[str, Any], *, previous: Dict[str, Any] | None
@@ -1241,8 +1347,17 @@ class MemoryV2Store:
         payload.pop("chain_index", None)
         payload["schema_version"] = RAW_EVENT_SCHEMA_VERSION
         payload.setdefault("id", f"event_{uuid.uuid4().hex}")
-        payload.setdefault("created_at", utc_now_iso())
-        payload.setdefault("observed_at", payload["created_at"])
+        created_at = self._validated_evidence_timestamp(
+            payload.get("created_at"),
+            field_name="created_at",
+            fallback=utc_now_iso(),
+        )
+        payload["created_at"] = created_at
+        payload["observed_at"] = self._validated_evidence_timestamp(
+            payload.get("observed_at"),
+            field_name="observed_at",
+            fallback=created_at,
+        )
         payload.setdefault("archive_status", "active")
         event_type = str(payload.get("type") or "").lower()
         payload["trust_level"] = "tool_output_untrusted" if "tool" in event_type else "untrusted"
@@ -1259,6 +1374,29 @@ class MemoryV2Store:
         payload["content_sha256"] = self._raw_event_content_hash(payload)
         payload["record_sha256"] = self._raw_event_record_hash(payload)
         return payload
+
+    @staticmethod
+    def _validated_evidence_timestamp(
+        value: Any,
+        *,
+        field_name: str,
+        fallback: str = "",
+    ) -> str:
+        """Return a nonblank timezone-aware ISO timestamp or fail closed."""
+        text = str(value or "").strip() or str(fallback or "").strip()
+        if not text:
+            raise ValidationError(f"raw event {field_name} is required")
+        try:
+            parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+        except ValueError as exc:
+            raise ValidationError(
+                f"raw event {field_name} must be a valid ISO-8601 timestamp"
+            ) from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValidationError(
+                f"raw event {field_name} must include a timezone offset"
+            )
+        return text
 
     @staticmethod
     def _cap_tool_event_fields(payload: Dict[str, Any]) -> None:

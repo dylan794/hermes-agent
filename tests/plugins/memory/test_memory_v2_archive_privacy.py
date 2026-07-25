@@ -34,6 +34,7 @@ SECRET_VALUES = [
     "https://user:" + "pa" + "ss" + "@example.com/private",
     "cookie: supersecretcookie",
     "/home/dylan_kinsman/private/file.txt",
+    r"C:\Users\Dylan\Documents\private-notes.txt",
     "discord user id: 123456789012345678",
 ]
 
@@ -61,6 +62,7 @@ def test_redaction_covers_common_secret_path_and_id_patterns():
     assert "user:pass" not in redacted
     assert "supersecretcookie" not in redacted
     assert "/home/dylan_kinsman" not in redacted
+    assert r"C:\Users\Dylan" not in redacted
     assert "123456789012345678" not in redacted
     meta = redaction_metadata({"text": joined})
     assert meta["redaction_version"] >= 2

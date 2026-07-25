@@ -5,9 +5,11 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import sqlite3
 
+import pytest
+
 from plugins.memory.memory_v2.health import MemoryHealthChecker
 from plugins.memory.memory_v2.index import MemoryV2Index
-from plugins.memory.memory_v2.schemas import CandidateMemory, MemoryItem, MemoryType, ProjectCard, SourceRef
+from plugins.memory.memory_v2.schemas import CandidateMemory, MemoryItem, MemoryType, ProjectCard, SourceRef, ValidationError
 from plugins.memory.memory_v2.store import MemoryV2Store
 
 
@@ -34,6 +36,19 @@ def test_index_initialize_creates_sqlite_schema(tmp_path):
     assert "memories_fts" in tables
     assert "retrieval_log" in tables
     assert "source_refs" in tables
+
+
+def test_index_connection_context_closes_handle_for_atomic_replacement(tmp_path):
+    store = _store(tmp_path)
+    index = MemoryV2Index(store.base_dir / "indexes" / "memory.sqlite")
+    index.initialize()
+    conn = index._connect()
+
+    with conn:
+        assert conn.execute("SELECT 1").fetchone() == (1,)
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        conn.execute("SELECT 1")
 
 
 def test_initialize_rebuilds_legacy_fts_table_with_missing_columns(tmp_path):
@@ -436,6 +451,49 @@ def test_search_excludes_expired_and_not_yet_valid_active_memories(tmp_path):
     assert [result["id"] for result in results] == ["pref_current"]
 
 
+def test_historical_routes_include_past_validity_but_never_future_validity(tmp_path):
+    store = _store(tmp_path)
+    index = MemoryV2Index(store.base_dir / "indexes" / "memory.sqlite")
+    index.initialize()
+    for item in (
+        MemoryItem(
+            id="historical_expired",
+            type="fact",
+            subject="history",
+            value="Historical routing temporal evidence expired.",
+            summary="Historical routing temporal evidence expired.",
+            expires_at="2000-01-01T00:00:00Z",
+            source_refs=["event_expired"],
+        ),
+        MemoryItem(
+            id="historical_past_validity",
+            type="fact",
+            subject="history",
+            value="Historical routing temporal evidence past validity.",
+            summary="Historical routing temporal evidence past validity.",
+            valid_until="2000-01-01T00:00:00Z",
+            source_refs=["event_past_validity"],
+        ),
+        MemoryItem(
+            id="historical_future",
+            type="fact",
+            subject="history",
+            value="Historical routing temporal evidence future validity.",
+            summary="Historical routing temporal evidence future validity.",
+            valid_from="2999-01-01T00:00:00Z",
+            source_refs=["event_future"],
+        ),
+    ):
+        index.index_memory_item(item)
+
+    expected = {"historical_expired", "historical_past_validity"}
+    for route in ("deep_recall", "past_conversation_exact", "contradiction_check"):
+        results = index.search("historical routing temporal evidence", route=route, limit=10)
+        assert {result["id"] for result in results} == expected
+
+    assert index.search("historical routing temporal evidence", route="fact_recall", limit=10) == []
+
+
 def test_search_orders_candidate_gate_decisions_explicitly(tmp_path):
     store = _store(tmp_path)
     index = MemoryV2Index(store.base_dir / "indexes" / "memory.sqlite")
@@ -716,16 +774,17 @@ def test_multi_pool_search_order_is_insertion_invariant(tmp_path):
     assert orders[0] == orders[1]
 
 
-def test_rebuild_from_store_skips_raw_events_missing_ids(tmp_path):
+def test_rebuild_from_store_refuses_unverifiable_raw_events_missing_ids(tmp_path):
     store = _store(tmp_path)
     store._append_jsonl(store.raw_events_path, {"type": "turn", "user_content": "legacy missing id"})
     index = MemoryV2Index(store.base_dir / "indexes" / "memory.sqlite")
     index.initialize()
 
-    counts = index.rebuild_from_store(store)
+    with pytest.raises(ValidationError, match="integrity verification failed"):
+        index.rebuild_from_store(store)
 
-    assert counts["raw_events"] == 0
     assert index.count_memories() == 0
+    assert store.read_raw_archive_manifest()["derived_index_status"] == "integrity_failed"
 
 
 def test_rebuild_from_store_indexes_open_loops_and_stopword_queries_do_not_match(tmp_path):

@@ -26,7 +26,7 @@ current-turn conversation-loop injection.
 The packet acceptance command is:
 
 ```bash
-venv/bin/python -m pytest \
+scripts/run_tests.sh \
   tests/plugins/memory/test_memory_v2_cache_aware_context.py \
   tests/agent/test_memory_v2_conversation_loop_session_prefetch.py -q
 ```
@@ -34,7 +34,7 @@ venv/bin/python -m pytest \
 The focused provider regression command is:
 
 ```bash
-venv/bin/python -m pytest tests/plugins/memory/test_memory_v2_provider.py -q
+scripts/run_tests.sh tests/plugins/memory/test_memory_v2_provider.py -q
 ```
 
 Acceptance result: 8 passed. Combined acceptance, provider, retrieval, and

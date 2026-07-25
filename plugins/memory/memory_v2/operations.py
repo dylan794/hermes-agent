@@ -22,7 +22,15 @@ from typing import Any, Dict, List, Optional
 
 from .consolidation import RuleBasedConsolidator
 from .index import MemoryV2Index
-from .schemas import CandidateMemory, GateDecision, MemoryItem, MemoryStatus, ValidationError, utc_now_iso
+from .schemas import (
+    CandidateMemory,
+    GateDecision,
+    MemoryItem,
+    MemoryStatus,
+    ValidationError,
+    parse_evidence_timestamp,
+    utc_now_iso,
+)
 from .store import MemoryV2Store
 
 
@@ -480,6 +488,12 @@ class MemoryOperationService:
             if not force_reason:
                 return self._error("promote_candidate", "force_reason is required when force=true")
             valid_refs = [source_id for source_id in candidate.source_refs if self._source_exists(source_id)]
+            invalid_timestamps = self._invalid_evidence_timestamp_refs(valid_refs)
+            if invalid_timestamps:
+                return self._error(
+                    "promote_candidate",
+                    f"candidate source_refs require valid evidence timestamps: {invalid_timestamps}",
+                )
             if valid_refs != list(candidate.source_refs):
                 data = candidate.to_dict()
                 data["source_refs"] = valid_refs
@@ -491,10 +505,43 @@ class MemoryOperationService:
         dangling = [source_id for source_id in candidate.source_refs if not self._source_exists(source_id)]
         if dangling:
             return self._error("promote_candidate", f"candidate has dangling source_refs: {dangling}")
+        invalid_timestamps = self._invalid_evidence_timestamp_refs(candidate.source_refs)
+        if invalid_timestamps:
+            return self._error(
+                "promote_candidate",
+                f"candidate source_refs require valid evidence timestamps: {invalid_timestamps}",
+            )
         return MemoryOperationResult(success=True, payload={"candidate": candidate.to_dict()})
 
     def _source_exists(self, source_id: str) -> bool:
         return self.store.source_ref_exists(source_id, index=self.index)
+
+    def _invalid_evidence_timestamp_refs(self, source_ids: List[str]) -> List[str]:
+        invalid: List[str] = []
+        for source_id in source_ids:
+            source = self.store.read_source_ref(source_id)
+            if source is None:
+                invalid.append(str(source_id))
+                continue
+            try:
+                source_time = parse_evidence_timestamp(
+                    source.observed_at,
+                    f"source_ref[{source_id}].observed_at",
+                )
+                raw_event_id = self.store.raw_event_id_from_source_ref(source)
+                if raw_event_id:
+                    raw_event = self.store.get_raw_event_by_id(raw_event_id, index=self.index)
+                    if raw_event is None:
+                        raise ValidationError("canonical raw event is missing")
+                    raw_time = parse_evidence_timestamp(
+                        raw_event.get("created_at"),
+                        f"raw_event[{raw_event_id}].created_at",
+                    )
+                    if source_time != raw_time:
+                        raise ValidationError("source timestamp does not match canonical raw evidence")
+            except (OSError, ValueError, ValidationError):
+                invalid.append(str(source_id))
+        return invalid
 
     def _validate_memory_items_invariants(self) -> None:
         for item in self.store.list_memory_items():

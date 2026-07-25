@@ -167,6 +167,18 @@ def utc_now_iso() -> str:
     )
 
 
+def parse_evidence_timestamp(value: Any, field_name: str = "observed_at") -> datetime:
+    """Parse a provenance timestamp, requiring an absolute ISO-8601 instant."""
+    text = _require_nonblank(value, field_name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValidationError(f"{field_name} must be an ISO timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValidationError(f"{field_name} must include a timezone offset")
+    return parsed.astimezone(timezone.utc)
+
+
 def _require_nonblank(value: Any, field_name: str) -> str:
     text = str(value or "").strip()
     if not text:

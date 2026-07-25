@@ -238,6 +238,7 @@ def test_consolidation_merges_project_state_candidate_into_project_card(tmp_path
             decisions=["Use local files as durable truth."],
             next_actions=["Add candidate promotion."],
             source_refs=["event_old"],
+            updated_at="2026-01-01T00:00:00Z",
         )
     )
     candidate = CandidateMemory(

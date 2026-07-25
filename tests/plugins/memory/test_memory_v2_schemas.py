@@ -25,7 +25,17 @@ from plugins.memory.memory_v2.schemas import (
     ValidationError,
     WorkingMemory,
     normalize_project_id,
+    parse_evidence_timestamp,
 )
+
+
+def test_parse_evidence_timestamp_requires_an_absolute_iso_instant():
+    assert parse_evidence_timestamp("2026-07-20T12:00:00-07:00").isoformat() == (
+        "2026-07-20T19:00:00+00:00"
+    )
+    for invalid in ("", "not-a-timestamp", "2026-07-20T12:00:00"):
+        with pytest.raises(ValidationError):
+            parse_evidence_timestamp(invalid)
 
 
 def test_artifact_record_accepts_string_enums_and_round_trips():

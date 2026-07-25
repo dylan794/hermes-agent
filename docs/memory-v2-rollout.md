@@ -5,7 +5,7 @@ This checklist is the short operational companion to `docs/memory-v2-archive-ops
 ## Stage 0: local validation
 
 ```bash
-python -m pytest tests/plugins/memory/test_memory_v2_cli.py -q
+scripts/run_tests.sh tests/plugins/memory/test_memory_v2_cli.py -q
 python scripts/memory_v2_archive_ops.py privacy-scan --paths docs scripts plugins/memory/memory_v2 tests/plugins/memory --format json
 python scripts/memory_v2_archive_ops.py eval --no-fail-on-acceptance
 ```

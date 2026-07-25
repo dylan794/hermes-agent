@@ -45,11 +45,11 @@ memory_v2:
 
 ## Evaluation contract
 
-`memory_v2_eval.py --chronological-contracts` produces deterministic local 30-, 90-, and 365-day scenarios and evaluates acceptance per horizon. The current benchmark reports measured results and exits non-zero when any gate is missed.
+`memory_v2_eval.py --chronological-contracts` produces deterministic local 30-, 90-, and 365-day scenarios and evaluates acceptance per horizon. All three current contracts pass, while the command still exits non-zero if any gate regresses.
 
-**The existence of these contracts is not a claim that Memory v2 beats human recall or the baseline today.** The current longitudinal gates remain unmet. P0 makes that failure truthful and reproducible; improving retrieval quality is subsequent work.
+**The existence of these contracts is not a claim that Memory v2 beats human recall.** They are deterministic local regression contracts, not a human-baseline study.
 
-The legacy hard benchmark likewise reports its current miss rather than using expected source labels or fixture-only precision filters to manufacture a pass.
+The hard longitudinal benchmark currently passes without eval-only precision filters. Its measured source recall is `1.0` for Memory v2 versus `0.9` for raw FTS.
 
 ## Retired pre-P0 contracts
 
@@ -71,13 +71,13 @@ Exact node IDs live in `tests/plugins/memory/conftest.py`. New failures are not 
   tests/agent/test_memory_v2_conversation_loop_session_prefetch.py \
   tests/agent/test_memory_provider.py -q
 
-venv/bin/python scripts/memory_v2_eval.py \
+python scripts/memory_v2_eval.py \
   --dataset plugins/memory/memory_v2/evals/fixtures/hard_longitudinal_memory_v2_v1.yaml \
   --baseline raw_fts --baseline memory_v2 \
   --output /tmp/memory-v2-hard.json
-venv/bin/python scripts/memory_v2_eval.py \
+python scripts/memory_v2_eval.py \
   --chronological-contracts --baseline memory_v2 \
   --output /tmp/memory-v2-longitudinal.json
 ```
 
-For benchmark commands, non-zero exit status is expected whenever acceptance gates are not met; inspect the emitted report rather than treating process success as the metric.
+Benchmark commands exit zero when all acceptance gates pass and non-zero on a regression; inspect the emitted report for the measured metrics.

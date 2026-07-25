@@ -9,6 +9,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
@@ -31,6 +32,17 @@ from .store import MemoryV2Store
 
 RAW_ARCHIVE_INDEX_SCHEMA_VERSION = 1
 MAX_RAW_ARCHIVE_SOURCE_IDS = 100
+HISTORICAL_ROUTES = frozenset({"deep_recall", "past_conversation_exact", "contradiction_check"})
+
+
+class _ClosingConnection(sqlite3.Connection):
+    """SQLite context manager that commits/rolls back and then closes."""
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
+        try:
+            return bool(super().__exit__(exc_type, exc_value, traceback))
+        finally:
+            self.close()
 
 
 class MemoryV2Index:
@@ -513,6 +525,7 @@ class MemoryV2Index:
         byte_offset: int | None = None,
         byte_length: int | None = None,
         line_no: int | None = None,
+        _conn: sqlite3.Connection | None = None,
     ) -> bool:
         """Index raw archive event metadata into rebuildable raw-event tables."""
         event = redact_data(dict(event))
@@ -544,7 +557,8 @@ class MemoryV2Index:
         assistant_content = redact_text(str(event.get("assistant_content") or ""))
         content = redact_text(str(event.get("content") or ""))
         tool = redact_text(str(event.get("tool") or ""))
-        with self._connect() as conn:
+        connection_context = nullcontext(_conn) if _conn is not None else self._connect()
+        with connection_context as conn:
             conn.execute(
                 """
                 INSERT INTO raw_events (
@@ -759,11 +773,11 @@ class MemoryV2Index:
             filters.append("r.event_type = ?")
             params.append(str(event_type))
         if created_after:
-            filters.append("r.created_at >= ?")
-            params.append(str(created_after))
+            filters.append("julianday(r.created_at) >= julianday(?)")
+            params.append(self._normalized_time_filter(created_after, field_name="created_after"))
         if created_before:
-            filters.append("r.created_at <= ?")
-            params.append(str(created_before))
+            filters.append("julianday(r.created_at) <= julianday(?)")
+            params.append(self._normalized_time_filter(created_before, field_name="created_before"))
         if source_ids:
             placeholders = ", ".join("?" for _ in source_ids)
             filters.append(f"(r.id IN ({placeholders}) OR r.source_ref_id IN ({placeholders}))")
@@ -1074,6 +1088,7 @@ class MemoryV2Index:
             return []
         safe_limit = self._coerce_limit(limit)
         route_key = str(route or "").strip().lower()
+        include_historical = route_key in HISTORICAL_ROUTES
         preserve_bm25 = route_key in {"deep_recall", "past_conversation_exact"}
         fts_pools = (
             [("bm25", fts_query) for fts_query in self._fts_queries(query_text)]
@@ -1109,7 +1124,7 @@ class MemoryV2Index:
                 ).fetchall()
                 for position, row in enumerate(rows, start=1):
                     result = self._row_to_result(row)
-                    if not self._is_temporally_visible(result):
+                    if not self._is_temporally_visible(result, include_historical=include_historical):
                         continue
                     item_id = str(result.get("id") or "")
                     existing = fused.get(item_id)
@@ -1447,47 +1462,58 @@ class MemoryV2Index:
 
     def rebuild_raw_archive_index(self, store: MemoryV2Store) -> Dict[str, Any]:
         """Rebuild only derived raw archive index tables from canonical JSONL."""
-        self.initialize()
-        count = 0
-        last_record_sha256 = ""
-        with self._connect() as conn:
-            conn.execute("DELETE FROM raw_events")
-            conn.execute("DELETE FROM raw_events_fts")
-        if store.raw_events_path.exists():
-            with store.raw_events_path.open("rb") as fh:
-                line_no = 0
-                while True:
-                    byte_offset = fh.tell()
-                    line = fh.readline()
-                    if not line:
-                        break
-                    line_no += 1
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        event = json.loads(stripped.decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        continue
-                    if not isinstance(event, dict):
-                        continue
-                    if self.index_raw_archive_event(
-                        event,
-                        byte_offset=byte_offset,
-                        byte_length=len(line),
-                        line_no=line_no,
-                    ):
-                        count += 1
-                        last_record_sha256 = str(event.get("record_sha256") or last_record_sha256)
-        status = {
-            "derived_index_status": "ok",
-            "indexed_event_count": count,
-            "last_indexed_record_sha256": last_record_sha256,
-            "raw_index_schema_version": RAW_ARCHIVE_INDEX_SCHEMA_VERSION,
-        }
-        if hasattr(store, "update_raw_archive_index_status"):
-            store.update_raw_archive_index_status(**status)
-        return status
+        with self._rebuild_lock, store.profile_lock():
+            self._require_verified_raw_archive(store)
+            self.initialize()
+            count = 0
+            last_record_sha256 = ""
+            try:
+                with self._connect() as conn:
+                    conn.execute("DELETE FROM raw_events")
+                    conn.execute("DELETE FROM raw_events_fts")
+                    if store.raw_events_path.exists():
+                        with store.raw_events_path.open("rb") as fh:
+                            line_no = 0
+                            while True:
+                                byte_offset = fh.tell()
+                                line = fh.readline()
+                                if not line:
+                                    break
+                                line_no += 1
+                                stripped = line.strip()
+                                if not stripped:
+                                    continue
+                                event = json.loads(stripped.decode("utf-8"))
+                                if not isinstance(event, dict):
+                                    raise ValidationError(f"raw archive line {line_no} is not a JSON object")
+                                if self.index_raw_archive_event(
+                                    event,
+                                    byte_offset=byte_offset,
+                                    byte_length=len(line),
+                                    line_no=line_no,
+                                    _conn=conn,
+                                ):
+                                    count += 1
+                                    last_record_sha256 = str(event.get("record_sha256") or last_record_sha256)
+                    # Recheck inside the transaction immediately before commit.
+                    # This catches direct filesystem modification during the
+                    # scan; normal appends are excluded by the profile lock.
+                    self._require_verified_raw_archive(store)
+            except ValidationError:
+                self._mark_raw_index_unusable(store, status="integrity_failed")
+                raise
+            except Exception:
+                self._mark_raw_index_unusable(store, status="stale")
+                raise
+            status = {
+                "derived_index_status": "ok",
+                "indexed_event_count": count,
+                "last_indexed_record_sha256": last_record_sha256,
+                "raw_index_schema_version": RAW_ARCHIVE_INDEX_SCHEMA_VERSION,
+            }
+            if hasattr(store, "update_raw_archive_index_status"):
+                store.update_raw_archive_index_status(**status)
+            return status
 
     def rebuild_from_store(self, store: MemoryV2Store) -> Dict[str, int]:
         """Rebuild the derived index from canonical files and atomically publish it.
@@ -1497,7 +1523,8 @@ class MemoryV2Index:
         passes SQLite integrity checks, so interrupted/crashing rebuilds preserve
         the previous usable index.
         """
-        with self._rebuild_lock:
+        with self._rebuild_lock, store.profile_lock():
+            self._require_verified_raw_archive(store)
             original_db_path = self.db_path
             original_db_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_db_path = original_db_path.with_name(f".{original_db_path.name}.{uuid.uuid4().hex}.tmp")
@@ -1550,6 +1577,7 @@ class MemoryV2Index:
                     if integrity != "ok":
                         raise sqlite3.DatabaseError(f"rebuilt index failed integrity_check: {integrity}")
                     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                self._require_verified_raw_archive(store)
                 self.db_path = original_db_path
                 if original_db_path.exists():
                     with self._connect() as conn:
@@ -1602,16 +1630,16 @@ class MemoryV2Index:
         ]
 
     @staticmethod
-    def _is_temporally_visible(result: Dict[str, Any]) -> bool:
+    def _is_temporally_visible(result: Dict[str, Any], *, include_historical: bool = False) -> bool:
         now = datetime.now(timezone.utc)
         valid_from = MemoryV2Index._parse_time(result.get("valid_from"))
         valid_until = MemoryV2Index._parse_time(result.get("valid_until"))
         expires_at = MemoryV2Index._parse_time(result.get("expires_at"))
         if valid_from is not None and valid_from > now:
             return False
-        if valid_until is not None and valid_until < now:
+        if not include_historical and valid_until is not None and valid_until < now:
             return False
-        if expires_at is not None and expires_at < now:
+        if not include_historical and expires_at is not None and expires_at < now:
             return False
         return True
 
@@ -1627,6 +1655,38 @@ class MemoryV2Index:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed
+
+    @staticmethod
+    def _normalized_time_filter(value: Any, *, field_name: str) -> str:
+        parsed = MemoryV2Index._parse_time(value)
+        if parsed is None:
+            raise ValidationError(f"{field_name} must be an ISO-8601 timestamp")
+        return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _mark_raw_index_unusable(store: MemoryV2Store, *, status: str) -> None:
+        if not hasattr(store, "update_raw_archive_index_status"):
+            return
+        manifest = store.read_raw_archive_manifest()
+        store.update_raw_archive_index_status(
+            derived_index_status=status,
+            indexed_event_count=int(manifest.get("indexed_event_count") or 0),
+            last_indexed_record_sha256=str(manifest.get("last_indexed_record_sha256") or ""),
+            raw_index_schema_version=int(
+                manifest.get("raw_index_schema_version") or RAW_ARCHIVE_INDEX_SCHEMA_VERSION
+            ),
+        )
+
+    @classmethod
+    def _require_verified_raw_archive(cls, store: MemoryV2Store) -> Dict[str, Any]:
+        verification = store.verify_raw_archive()
+        if str(verification.get("status") or "").lower() != "ok":
+            cls._mark_raw_index_unusable(store, status="integrity_failed")
+            raise ValidationError(
+                "raw archive integrity verification failed; refusing to rebuild derived index "
+                f"(issues={int(verification.get('issue_count') or 0)})"
+            )
+        return verification
 
     @staticmethod
     def _timestamp_epoch(value: Any) -> float:
@@ -1674,7 +1734,7 @@ class MemoryV2Index:
         return max(1, min(value, 50))
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=5.0)
+        conn = sqlite3.connect(str(self.db_path), timeout=5.0, factory=_ClosingConnection)
         # Canonical mutations already serialize through the cross-process
         # profile lock. DELETE journaling avoids inheriting fragile WAL shared
         # state when worker processes are forked after SQLite was initialized.

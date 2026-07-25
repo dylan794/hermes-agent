@@ -10,7 +10,6 @@ does not apply review-plan actions.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -25,6 +24,7 @@ import yaml
 
 from .config import load_memory_v2_config
 from .dream_consolidation import build_dream_consolidation_snapshot
+from .file_lock import FileLockUnavailableError, release_exclusive, try_acquire_exclusive
 from .health import MemoryHealthChecker
 from .index import MemoryV2Index
 from .operations import MemoryOperationService
@@ -358,15 +358,20 @@ def _try_acquire_dream_lock(store: MemoryV2Store):
     lock_dir = store.base_dir / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / "dream-cycle.lock"
-    handle = lock_path.open("a+", encoding="utf-8")
+    handle = lock_path.open("a+b")
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        acquired = try_acquire_exclusive(handle)
+    except FileLockUnavailableError:
+        handle.close()
+        raise
+    if not acquired:
         handle.close()
         return None, lock_path
     handle.seek(0)
     handle.truncate()
-    handle.write(json.dumps({"pid": os.getpid(), "acquired_at": utc_now_iso()}, sort_keys=True) + "\n")
+    handle.write(
+        (json.dumps({"pid": os.getpid(), "acquired_at": utc_now_iso()}, sort_keys=True) + "\n").encode("utf-8")
+    )
     handle.flush()
     os.fsync(handle.fileno())
     return handle, lock_path
@@ -375,7 +380,7 @@ def _try_acquire_dream_lock(store: MemoryV2Store):
 def _release_dream_lock(handle, lock_path: Path) -> None:
     del lock_path  # Keep the lock file in place; unlinking creates a flock inode race.
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        release_exclusive(handle)
     finally:
         handle.close()
 

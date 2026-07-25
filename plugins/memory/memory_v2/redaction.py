@@ -42,7 +42,7 @@ _HIGH_ENTROPY_ASSIGNMENT_RE = re.compile(
     r"(?i)\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*\s*(?:=|:|is)\s*)([^\s,;\]\}\)]+)"
 )
 _LOCAL_PATH_RE = re.compile(
-    r"(?i)(?:/home/[^\s\"'<>]+|/mnt/[a-z]/Users/[^\s\"'<>]+|[A-Z]:\\\\Users\\\\[^\s\"'<>]+)"
+    r"(?i)(?:/home/[^\s\"'<>]+|/mnt/[a-z]/Users/[^\s\"'<>]+|[A-Z]:[\\/]Users[\\/][^\s\"'<>]+)"
 )
 _COOKIE_SESSION_RE = re.compile(
     r"(?is)\b((?:cookie|set-cookie|sessionid|sid)\s*(?:=|:)?\s*)([^\s,;\]\}\)]+)"

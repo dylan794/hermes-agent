@@ -277,6 +277,80 @@ def test_append_and_read_raw_events_jsonl(tmp_path):
     assert events[0]["session_id"] == "session-1"
 
 
+def test_raw_event_blank_timestamps_are_filled_and_invalid_timestamps_rejected(tmp_path):
+    store = MemoryV2Store(tmp_path / "memory_v2")
+    store.initialize()
+
+    event = store.append_raw_event(
+        {
+            "type": "turn",
+            "content": "timestamp evidence",
+            "created_at": "",
+            "observed_at": "",
+        }
+    )
+
+    assert event["created_at"]
+    assert event["observed_at"] == event["created_at"]
+    assert store.read_source_ref(event["id"]).observed_at == event["created_at"]
+
+    with pytest.raises(ValidationError, match="created_at.*ISO-8601"):
+        store.append_raw_event(
+            {
+                "type": "turn",
+                "content": "invalid timestamp must not become evidence",
+                "created_at": "not-a-timestamp",
+            }
+        )
+
+    assert store.count_raw_events() == 1
+
+
+def test_bounded_raw_hydration_recomputes_hashes_and_rejects_degraded_manifest(tmp_path):
+    from plugins.memory.memory_v2.index import MemoryV2Index
+
+    store = MemoryV2Store(tmp_path / "memory_v2")
+    store.initialize()
+    index = MemoryV2Index(store.default_index_path)
+    index.initialize()
+    event = store.append_raw_event(
+        {"type": "turn", "content": "canonical alpha", "created_at": "2026-07-20T00:00:00Z"}
+    )
+    original = store.raw_events_path.read_text(encoding="utf-8")
+    store.raw_events_path.write_text(
+        original.replace("canonical alpha", "canonical omega"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="content hash mismatch"):
+        store.get_raw_event_by_id(event["id"], index=index)
+
+    manifest = store.rebuild_raw_archive_manifest()
+    assert manifest["status"] == "degraded"
+    with pytest.raises(ValidationError, match="integrity is degraded"):
+        store.get_raw_event_by_id(event["id"], index=index)
+
+    with pytest.raises(ValidationError, match="integrity is degraded"):
+        store.append_raw_event({"type": "turn", "content": "must not extend degraded evidence"})
+
+
+def test_store_rejects_profile_root_symlink_escape(tmp_path):
+    profile_root = tmp_path / "profile"
+    outside = tmp_path / "outside"
+    profile_root.mkdir()
+    outside.mkdir()
+    memory_link = profile_root / "memory_v2"
+    try:
+        memory_link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable on this platform: {exc}")
+
+    with pytest.raises(ValidationError, match="symlink or junction escape"):
+        MemoryV2Store(memory_link)
+
+    assert list(outside.iterdir()) == []
+
+
 def test_raw_archive_manifest_and_integrity_report_are_privacy_safe(tmp_path):
     store = MemoryV2Store(tmp_path / "memory_v2")
     store.initialize()

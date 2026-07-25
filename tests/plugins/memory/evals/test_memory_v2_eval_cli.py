@@ -8,6 +8,19 @@ import sys
 from pathlib import Path
 
 
+def test_memory_v2_eval_cli_direct_script_bootstraps_repo_imports():
+    completed = subprocess.run(
+        [sys.executable, "-I", "scripts/memory_v2_eval.py", "--help"],
+        check=False,
+        cwd=Path(__file__).parents[4],
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Run deterministic Memory v2 evaluation fixtures" in completed.stdout
+
+
 def test_memory_v2_eval_cli_writes_json_report(tmp_path):
     output_path = tmp_path / "report.json"
     completed = subprocess.run(
@@ -215,7 +228,7 @@ queries:
     assert hard_check["passed"] is False
 
 
-def test_memory_v2_eval_cli_hard_benchmark_reports_current_measured_failure_honestly(tmp_path):
+def test_memory_v2_eval_cli_hard_benchmark_passes_measured_acceptance(tmp_path):
     output_path = tmp_path / "hard_report.json"
     completed = subprocess.run(
         [
@@ -239,9 +252,9 @@ def test_memory_v2_eval_cli_hard_benchmark_reports_current_measured_failure_hone
         capture_output=True,
     )
 
-    assert completed.returncode == 1
-    assert "acceptance failed" in completed.stderr
+    assert completed.returncode == 0, completed.stderr
     payload = json.loads(output_path.read_text(encoding="utf-8"))
-    assert payload["acceptance"]["passed"] is False
+    assert payload["acceptance"]["passed"] is True
     hard_check = next(check for check in payload["acceptance"]["checks"] if check["name"] == "memory_v2_beats_raw_fts_source_recall")
-    assert hard_check["passed"] is False
+    assert hard_check["passed"] is True
+    assert payload["summary"]["memory_v2"]["source_recall_avg"] > payload["summary"]["raw_fts"]["source_recall_avg"]

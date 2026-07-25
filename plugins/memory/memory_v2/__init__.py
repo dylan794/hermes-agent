@@ -335,7 +335,7 @@ REVIEW_PLAN_SCHEMA = {
 
 REVIEW_APPLY_SCHEMA = {
     "name": "memory_v2_review_apply",
-    "description": "Apply selected actions from a Memory v2 review plan with source, state, confirmation, and audit gates.",
+    "description": "Apply selected rejection actions from a Memory v2 review plan only when a trusted host/operator separately authorizes mutation; model arguments cannot grant authority.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -388,7 +388,7 @@ PROMOTE_SCHEMA = {
 
 REJECT_SCHEMA = {
     "name": "memory_v2_reject",
-    "description": "Reject one pending candidate only when bound to a fresh confirmed review-plan action.",
+    "description": "Reject one pending candidate only when bound to a fresh confirmed review-plan action and separately authorized by a trusted host/operator.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1341,6 +1341,14 @@ class MemoryV2Provider(MemoryProvider):
             raise ValueError("safe_rejection_canary_confirm must be a string")
         if auto_apply == "safe_rejection_canary" and safe_rejection_canary_confirm != SAFE_REJECTION_CANARY_CONFIRM:
             raise ValueError(f"safe_rejection_canary_confirm must equal {SAFE_REJECTION_CANARY_CONFIRM}")
+        review_apply_authorized = False
+        if auto_apply == "safe_rejection_canary":
+            review_apply_authorized = self._external_mutation_authorized("review_apply")
+            if not review_apply_authorized:
+                raise ValueError(
+                    "Memory v2 dream-cycle rejection requires trusted host/operator authority; "
+                    "model tool arguments cannot grant or replay that authority"
+                )
         recent_raw_limit = self._strict_int_arg(
             args, "recent_raw_limit", default=50, minimum=1, maximum=500
         )
@@ -1364,7 +1372,7 @@ class MemoryV2Provider(MemoryProvider):
             "safe_rejection_canary_confirm": safe_rejection_canary_confirm,
             "recent_raw_limit": recent_raw_limit,
             "run_extraction": False,
-            "allow_review_apply": self._config.review_apply.enabled,
+            "allow_review_apply": review_apply_authorized,
             "max_review_items": max_review_items,
             "max_actions": max_actions,
         }
@@ -1875,6 +1883,14 @@ class MemoryV2Provider(MemoryProvider):
         if raw_ids and not isinstance(raw_ids, list):
             return {"success": False, "error": "candidate_ids must be a list"}
         dry_run = False if args.get("dry_run", True) is False else True
+        if not dry_run and not self._external_mutation_authorized("review_apply"):
+            return {
+                "success": False,
+                "error": (
+                    "Memory v2 review mutation requires trusted host/operator authority; "
+                    "model tool arguments cannot grant or replay that authority"
+                ),
+            }
         service = MemoryOperationService(self.store, self.index)
         return MemoryReviewApplier(self.store, service).apply(
             plan_id=str(args.get("plan_id") or ""),
@@ -1889,6 +1905,14 @@ class MemoryV2Provider(MemoryProvider):
         validated = self._validated_direct_mutation_action(args, expected_operation="reject_candidate")
         if validated.get("success") is False:
             return validated
+        if not self._external_mutation_authorized("review_apply"):
+            return {
+                "success": False,
+                "error": (
+                    "Memory v2 candidate rejection requires trusted host/operator authority; "
+                    "model tool arguments cannot grant or replay that authority"
+                ),
+            }
         action = validated["action"]
         result = MemoryOperationService(self.store, self.index).reject_candidate(
             str(args.get("candidate_id") or ""),

@@ -20,9 +20,14 @@ from plugins.memory.memory_v2.schemas import CandidateMemory, CoreMemoryRecord, 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _provider(tmp_path):
+def _provider(tmp_path, *, mutation_authorizer=None):
     provider = MemoryV2Provider()
-    provider.initialize("session-dream", hermes_home=str(tmp_path), platform="discord")
+    provider.initialize(
+        "session-dream",
+        hermes_home=str(tmp_path),
+        platform="discord",
+        memory_v2_mutation_authorizer=mutation_authorizer,
+    )
     return provider
 
 
@@ -730,6 +735,54 @@ def test_safe_rejection_canary_applies_only_scoped_reject_lane_candidates_with_a
     assert decisions["cand_dream_safe"] == "pending"
     assert decisions["cand_reject_scoped_first"] == "rejected"
     assert decisions["cand_reject_scoped_second"] == "rejected"
+
+
+def test_provider_safe_rejection_canary_requires_trusted_host_authority(tmp_path):
+    provider = _provider(tmp_path)
+    event = _seed_safe_candidate(provider)
+    _append_candidate(
+        provider,
+        candidate_id="cand_provider_authority_reject",
+        claim="Temporary scratch note for this answer only.",
+        source_refs=[event["id"]],
+        memory_type="fact",
+    )
+    before = _dream_mutation_counts(provider)
+    args = {
+        "date": "2026-06-14",
+        "auto_apply": "safe_rejection_canary",
+        "safe_rejection_canary_confirm": "APPLY_MEMORY_V2_SAFE_REJECTION_CANARY",
+    }
+
+    missing = json.loads(provider.handle_tool_call("memory_v2_dream_cycle", args))
+
+    def broken_authorizer(scope, context):
+        raise RuntimeError("operator authority service unavailable")
+
+    provider._mutation_authorizer = broken_authorizer
+    errored = json.loads(provider.handle_tool_call("memory_v2_dream_cycle", args))
+
+    for payload in (missing, errored):
+        assert payload["success"] is False
+        assert "trusted host/operator authority" in payload["error"]
+    assert _dream_mutation_counts(provider) == before
+    assert _dream_report_files(tmp_path) == []
+
+    provider._mutation_authorizer = lambda scope, context: (
+        scope == "review_apply"
+        and context["platform"] == "discord"
+        and context["session_id"] == "session-dream"
+    )
+    authorized = json.loads(provider.handle_tool_call("memory_v2_dream_cycle", args))
+
+    decisions = {
+        candidate.id: candidate.gate_decision.value
+        for candidate in provider.store.list_candidates()
+    }
+    assert authorized["success"] is True
+    assert authorized["review_apply"]["summary"]["applied"] == 1
+    assert decisions["cand_dream_safe"] == "pending"
+    assert decisions["cand_provider_authority_reject"] == "rejected"
 
 
 def test_dream_cycle_auto_promotion_request_is_rejected_without_mutation_or_report(tmp_path):

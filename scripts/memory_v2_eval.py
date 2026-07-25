@@ -9,6 +9,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Direct script execution sets ``sys.path[0]`` to ``scripts/`` rather than the
+# repository root. Keep the documented ``python scripts/memory_v2_eval.py``
+# entry point self-contained even when Hermes is not installed site-wide.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from plugins.memory.memory_v2.evals.baselines import (
     ArchiveOnlyBaseline,
     MemoryV2Baseline,
