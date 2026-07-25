@@ -36,6 +36,7 @@ MAX_EVENT_UTF8_BYTES = 256_000
 MAX_TOTAL_EVENT_UTF8_BYTES = 8_000_000
 MAX_CONTEXT_UTF8_BYTES = 64_000
 MAX_GAP_DAYS = 36_500.0
+MAX_QUERY_SCOPE_IDS = 8
 _QUERY_SCOPE_KEYS = {
     "project_id",
     "project",
@@ -256,7 +257,9 @@ class ShadowRetrievalPipeline:
         if len(build.nodes) > int(self.config.max_derived_nodes):
             raise ShadowPipelineError("derived evidence exceeds its safety bound")
 
-        query_resolution = WorkstreamResolver().resolve(
+        query_resolution = WorkstreamResolver(
+            max_scope_ids=MAX_QUERY_SCOPE_IDS
+        ).resolve(
             self._query_event(
                 clean_query,
                 clean_cutoff,

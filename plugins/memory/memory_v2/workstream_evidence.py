@@ -62,6 +62,7 @@ _LINKAGE_FIELDS = (
     "reply_to_event_id",
 )
 _DEFAULT_MAX_ANCHORS_PER_EVENT = 256
+_DEFAULT_MAX_SCOPE_IDS = 16
 _DEFAULT_MAX_DERIVED_NODES = 10_000
 _DEFAULT_MAX_SPAN_CHARS = 4_000
 _MAX_CORROBORATION_GAP_SECONDS = 7 * 24 * 60 * 60
@@ -561,13 +562,19 @@ class WorkstreamResolver:
         self,
         *,
         max_anchors_per_event: int = _DEFAULT_MAX_ANCHORS_PER_EVENT,
+        max_scope_ids: int = _DEFAULT_MAX_SCOPE_IDS,
         max_span_chars: int = _DEFAULT_MAX_SPAN_CHARS,
     ) -> None:
         if not 1 <= int(max_anchors_per_event) <= 10_000:
             raise ValueError("max_anchors_per_event must be between 1 and 10000")
+        if not 1 <= int(max_scope_ids) <= _DEFAULT_MAX_SCOPE_IDS:
+            raise ValueError(
+                f"max_scope_ids must be between 1 and {_DEFAULT_MAX_SCOPE_IDS}"
+            )
         if not 1 <= int(max_span_chars) <= 16_000:
             raise ValueError("max_span_chars must be between 1 and 16000")
         self.max_anchors_per_event = int(max_anchors_per_event)
+        self.max_scope_ids = int(max_scope_ids)
         self.max_span_chars = int(max_span_chars)
 
     def resolve(self, event: Mapping[str, Any]) -> WorkstreamResolution:
@@ -693,11 +700,13 @@ class WorkstreamResolver:
                 )
             )
 
-        project_ids = tuple(sorted(projects))
-        workstream_ids = tuple(sorted(workstreams))
-        if len(project_ids) > 1:
+        project_ids, workstream_ids, scope_ids_overflowed = (
+            self._bounded_scope_ids(projects, workstreams)
+        )
+        anchor_limit_reached = anchor_limit_reached or scope_ids_overflowed
+        if len(projects) > 1:
             status = "multi_project"
-        elif project_ids or workstream_ids:
+        elif projects or workstreams:
             status = "resolved"
         else:
             status = "unknown"
@@ -720,6 +729,58 @@ class WorkstreamResolver:
             ),
             anchor_limit_reached=anchor_limit_reached,
         )
+
+    def _bounded_scope_ids(
+        self,
+        projects: Mapping[str, float],
+        workstreams: Mapping[str, float],
+    ) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+        """Project a resolution into the retrieval index's fixed scope budget."""
+
+        ranked_projects = sorted(
+            projects,
+            key=lambda item: (-projects[item], item),
+        )
+        ranked_workstreams = sorted(
+            workstreams,
+            key=lambda item: (-workstreams[item], item),
+        )
+        selected: list[tuple[str, str]] = []
+        if ranked_projects:
+            selected.append(("project", ranked_projects.pop(0)))
+        if ranked_workstreams and len(selected) < self.max_scope_ids:
+            selected.append(("workstream", ranked_workstreams.pop(0)))
+        remaining = [
+            *(
+                ("project", item, projects[item])
+                for item in ranked_projects
+            ),
+            *(
+                ("workstream", item, workstreams[item])
+                for item in ranked_workstreams
+            ),
+        ]
+        remaining.sort(
+            key=lambda item: (
+                -item[2],
+                0 if item[0] == "project" else 1,
+                item[1],
+            )
+        )
+        selected.extend(
+            (kind, item)
+            for kind, item, _confidence in remaining[
+                : self.max_scope_ids - len(selected)
+            ]
+        )
+        selected_projects = tuple(
+            sorted(item for kind, item in selected if kind == "project")
+        )
+        selected_workstreams = tuple(
+            sorted(item for kind, item in selected if kind == "workstream")
+        )
+        overflowed = len(projects) + len(workstreams) > self.max_scope_ids
+        return selected_projects, selected_workstreams, overflowed
 
     @staticmethod
     def _project_id(value: str) -> str:

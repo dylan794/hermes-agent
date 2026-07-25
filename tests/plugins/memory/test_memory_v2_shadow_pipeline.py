@@ -192,6 +192,30 @@ def test_end_to_end_returns_scoped_exact_citations_and_verified_neighbor(tmp_pat
     }.isdisjoint({"event-other"})
 
 
+def test_query_scope_is_projected_into_search_budget(tmp_path):
+    result = ShadowRetrievalPipeline(
+        tmp_path / "derived.sqlite",
+        config=_enabled_config(),
+        scratch_root=tmp_path,
+    ).run(
+        query="What did we previously decide?",
+        raw_events=_events(),
+        profile_id="profile-a",
+        tenant_id="tenant-a",
+        evidence_cutoff="2026-06-01T00:00:00Z",
+        context={
+            "gap_days": 30,
+            "project_id": [f"Project {index:02d}" for index in range(20)],
+            "workstream_id": ["Critical Workstream", "Secondary Workstream"],
+        },
+    )
+
+    query_scope = result["query_scope"]
+    assert len(query_scope["project_ids"]) + len(query_scope["workstream_ids"]) == 8
+    assert "project:project-00" in query_scope["project_ids"]
+    assert "workstream:critical-workstream" in query_scope["workstream_ids"]
+
+
 def test_future_evidence_is_suppressed(tmp_path):
     events = _events()
     events.append(

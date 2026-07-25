@@ -680,3 +680,20 @@ def test_resolver_supports_explicit_multi_project_values_and_artifact_refs() -> 
     assert resolution.status == "multi_project"
     assert resolution.project_ids == ("project:memory-v2", "project:stock-scout")
     assert any(item.kind == "artifact" for item in resolution.evidence)
+
+
+def test_resolver_projects_scope_into_fixed_index_budget() -> None:
+    event = _turn(
+        "many-scopes",
+        user="Continue the scoped retrieval work.",
+        project_id=[f"Project {index:02d}" for index in range(20)],
+        workstream_id=["Critical Workstream", "Secondary Workstream"],
+    )
+
+    resolution = WorkstreamResolver().resolve(event)
+
+    assert len(resolution.project_ids) + len(resolution.workstream_ids) == 16
+    assert "project:project-00" in resolution.project_ids
+    assert "workstream:critical-workstream" in resolution.workstream_ids
+    assert resolution.status == "multi_project"
+    assert resolution.anchor_limit_reached is True
