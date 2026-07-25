@@ -10,7 +10,17 @@ The goal is not to stuff more chat history into the model context. The goal is t
 
 ## Status
 
-Memory v2 is a research/prototype memory provider. It is fail-closed and should not be treated as a finished memory system. The [P0 hardening status](../../../docs/memory-v2-p0-status.md) is the source of truth for current guarantees, disabled defaults, benchmark limitations, and verification commands. [P1 candidate-only extraction](../../../docs/memory-v2-p1-extraction.md) documents typed claims, exact evidence spans, assistant-authority boundaries, and the optional structured-model adapter. In particular, the 30/90/365-day benchmark contracts are not currently passing claims.
+Memory v2 is a research/prototype memory provider. It is fail-closed and should not be treated as a finished memory system. The [P0 hardening status](../../../docs/memory-v2-p0-status.md) is the source of truth for current guarantees, disabled defaults, benchmark limitations, and verification commands. [P1 candidate-only extraction](../../../docs/memory-v2-p1-extraction.md) documents typed claims, exact evidence spans, assistant-authority boundaries, and the optional structured-model adapter. The deterministic 30/90/365-day contracts currently pass, but they are regression evidence, not a human-level or human-winning claim.
+
+The [North Star specification](../../../docs/memory-v2-north-star.md) defines the long-term goal of superhuman one-year work continuity, the paired human-baseline protocol required to substantiate it, safety hard gates, and permitted claim language. [Evaluation documentation](../../../docs/memory-v2-evals.md) covers the deterministic and human-baseline harnesses. The [operational pilot runbook](../../../docs/memory-v2-human-baseline-pilot.md) defines the small disjoint pilot and its power-planning diagnostics.
+
+The [offline shadow-retrieval path](../../../docs/memory-v2-shadow-retrieval.md) composes memory-need routing, corpus hygiene, workstream-scoped hybrid retrieval, local-model abstention, and exact evidence bundles. It is disabled by default and is not connected to the live provider.
+
+The [Earn-the-Canary study](../../../docs/memory-v2-earn-canary.md) defines the
+private, opt-in, four-arm longitudinal gate across no memory, raw FTS, Memory
+v2, and operator-selected oracle evidence. It uses blinded judging and a
+disjoint, untouched pilot decision pool; its reports are offline evidence with
+no mutation authority, not automatic rollout authorization.
 
 The [Phase 10 archive release checklist](../../../docs/memory-v2-archive-release-checklist.md) defines the overall rollout gate. The [Stage 8 isolated canary](../../../docs/memory-v2-stage-8-canary.md) is the authoritative Stage 8 feature-flag matrix, deterministic verification command, go/no-go contract, and rollback procedure.
 
@@ -24,7 +34,7 @@ Current strengths:
 - SQLite FTS indexing;
 - stale-memory supersession fields;
 - contradiction dashboard tooling;
-- opt-in high-confidence automatic supersession;
+- explicit reviewed supersession, with automatic supersession disabled;
 - deterministic local eval harness, including long-range/stale-fact/adversarial retrieval hardening fixtures;
 - lightweight report-only entity/graph link drafts;
 - report-only uncertainty/belief-update dashboard for low-confidence, stale, conflicting, expiring, and source-weak records;
@@ -37,7 +47,7 @@ Known limitations:
 - graph links are lightweight derived report drafts, not a persisted graph database;
 - consolidation is rule-based and intentionally conservative;
 - evals are local deterministic fixtures, not a complete human/LLM-judge benchmark;
-- automatic supersession is narrow and should remain opt-in until broader evals exist.
+- automatic promotion, automatic supersession, broad raw prefetch, and model-driven promotion remain disabled while Memory v2 is experimental.
 
 ## Why this exists
 
@@ -429,6 +439,22 @@ Things Memory v2 should not do:
 
 ## Evaluation harness
 
+The [North Star specification](../../../docs/memory-v2-north-star.md) separates current deterministic regression evidence from the preregistered paired human study required for any one-year superiority claim.
+
+The [portable SkillRegistry interface](../../../docs/memory-v2-portable-skill-registry.md)
+defines a separate, version-pinned procedure registry for eventual use outside
+Hermes. Skills are not semantic memories: Memory v2 may propose a
+source-grounded `skill_candidate` or retain an exact `procedure_ref`, but only
+a trusted host/operator can stage, activate, supersede, revoke, or execute a
+reviewed bundle. All automatic skill lifecycle actions remain disabled.
+
+The [Outcome Replay & Bottleneck Lab](../../../docs/memory-v2-outcome-replay-lab.md)
+uses minimized opt-in shadow artifacts and paired offline oracle variants to
+measure whether archive coverage, candidate recall, routing, ranking, temporal
+resolution, packet composition, or answer synthesis is the largest safe
+performance gap. It is diagnostic-only and never replays side effects or grants
+mutation authority.
+
 Memory v2 includes a deterministic local eval harness under:
 
 ```text
@@ -529,7 +555,7 @@ Medium-term:
 
 Long-term:
 
-- make long-term agent memory more reliable than raw context windows by combining evidence archives, compact current beliefs, temporal state, and eval-driven retrieval.
+- earn the narrowly defined, preregistered claim of superhuman one-year work continuity described in the [North Star specification](../../../docs/memory-v2-north-star.md), without weakening provenance, bounded retrieval, privacy, or operator authority.
 
 ## Philosophy
 

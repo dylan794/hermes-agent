@@ -2,6 +2,8 @@
 
 Memory v2 evals are deterministic, local regression checks for Hermes's Memory v2 provider. They are meant to catch retrieval regressions before dogfood or release work: source-grounded recall, stale/irrelevant memory suppression, and bounded memory packet behavior.
 
+The [North Star specification](memory-v2-north-star.md) defines the separate, preregistered human-baseline evidence required before claiming superiority at one-year work continuity. Passing the local harness does not establish that claim.
+
 The default packaged fixture is:
 
 ```text
@@ -49,6 +51,163 @@ Each query produces a score row with:
 
 Reports summarize metric averages per baseline.
 
+## Human-baseline harness
+
+The human-baseline harness supports a blinded, paired comparison between human
+and Memory v2 responses. It is deliberately separate from deterministic fixture
+scoring:
+
+Use the [operational pilot runbook](memory-v2-human-baseline-pilot.md) for the
+six-participant pilot design, disjointness audit, collection controls, and
+power-planning diagnostics.
+
+```text
+plugins/memory/memory_v2/evals/human_baseline.py
+scripts/memory_v2_human_baseline.py
+```
+
+Its versioned protocol schema is `memory-v2-human-baseline-protocol/v1`;
+responses, public packets, private keys, judgments, and results each use a
+separate versioned schema. A protocol identifies the study and `study_mode`;
+participants; paired queries; checkpoints; task strata; six fixed judgment
+dimensions; safety gates; coverage thresholds; superiority margin; judge
+minimums; and participant-cluster bootstrap settings. `study_mode` is
+`development`, `pilot`, or `confirmatory`; only the last can produce a
+superiority claim.
+
+The fixed dimension identifiers are `factual_correctness`,
+`temporal_correctness`, `completeness`, `source_grounding`, `actionability`, and
+`calibration_restraint`. The protocol registers `score_min`, `score_max`, and
+`dimension_minimum`; each query names its nonempty `applicable_dimensions`. A
+response is a work-continuity success only when its across-judge mean reaches
+the minimum on every applicable dimension and that response has no safety
+failure.
+
+For the North Star claim, `primary_checkpoint` is 365 days. The primary
+estimate is the paired Memory-v2-minus-human success-rate difference at that
+checkpoint. The 95% percentile interval resamples participant clusters while
+retaining all nested workstreams and response pairs. Superiority requires its
+lower bound to exceed the registered margin, every required 365-day stratum to
+meet its registered non-inferiority margin, complete coverage, and every Memory
+v2 hard gate to pass. Confirmatory mode enforces the North Star study floors,
+including a superiority margin of at least `0.05` and at least 10,000 bootstrap
+samples; lower settings remain available only for development or pilot runs.
+
+The workflow has three phases:
+
+```bash
+python scripts/memory_v2_human_baseline.py validate --protocol <protocol.json> --output <validation.json>
+python scripts/memory_v2_human_baseline.py prepare --protocol <protocol.json> --human-responses <human.json> --memory-responses <memory-v2.json> --packet-output <judge-packets.json> --key-output <private-key.json> --seed <sealed-integer-seed>
+python scripts/memory_v2_human_baseline.py score --protocol <protocol.json> --packets <judge-packets.json> --key <private-key.json> --judgments <judgments.json> --output <report.json> --require-superiority
+```
+
+- `validate` rejects incomplete schema, checkpoint/stratum coverage, participant
+  or item counts, judge requirements, thresholds, and safety gates before the
+  study is prepared.
+- `prepare` randomizes the paired responses into A/B judge packets without
+  structured condition labels, strips participant metadata, rejects configured
+  raw participant IDs found in public answer text, and writes the identity
+  mapping and seed separately as a sealed private key. It does not rewrite
+  answer text or guarantee that other stylistic/self-identifying clues are
+  absent.
+- `score` consumes frozen blinded judgments, resamples whole participant
+  clusters, reports the paired success-rate difference and confidence interval,
+  and applies the preregistered superiority and hard-gate decision. Without
+  `--require-superiority`, a valid, complete no-claim result exits successfully;
+  use the flag for a confirmatory superiority gate.
+
+Exit code `0` means the requested operation was valid and complete. With
+`--require-superiority`, exit code `1` means a valid study did not earn the
+claim. Exit code `2` means an artifact was invalid, incomplete, inconsistent,
+or tampered; do not interpret it as a measured no-claim result.
+
+Judges receive a condition-neutral reference-evidence and rubric pack, never the
+private mapping key. At least two blinded judges must score each response;
+primary-outcome disagreement requires blinded adjudication under the registered
+protocol. The question text, reference judgments, oracle source IDs, private
+mapping key, and judge comments must never enter Memory v2's archive or index
+before response generation. Commit to the seed at preregistration, keep it
+sealed through judging, and publish it only after judgments freeze.
+
+Every judgment supplies per-slot `material_error_notes` (`null` when absent, or
+an object containing `reason` and `evidence_refs`) and a boolean
+`potentially_identifiable` flag, in addition to scores, gate failures, and
+condition guesses. It also declares `judge_role` as `primary` or `adjudicator`.
+Only primary judges count toward `min_judges_per_item` and inter-rater
+agreement. An adjudicator is allowed only at the primary checkpoint and only
+when the primary judges disagree on binary work-continuity success.
+
+Pilot reports add `pilot_diagnostics.item_difficulty` and
+`pilot_diagnostics.participant_cluster_variance`, while inter-rater agreement
+is reported overall and by checkpoint. Use `audit-disjoint` before collection
+to reject exact overlap with development or prior-study protocols; the
+operational runbook documents the command and its limits.
+
+Before judging, a condition-blind operator applies the preregistered
+semantics-preserving formatting normalization and audits public packets. Do not
+silently rewrite or exclude self-identifying content. Judges record a
+post-score condition guess; publish non-`unsure` guess accuracy, the `unsure`
+rate, and flagged packet counts as a blinding-effectiveness check.
+
+The harness can establish that a protocol is internally complete and compute a
+decision. It cannot make a study representative, prove that evidence access was
+fair, or turn synthetic rows into a human comparison. Those requirements,
+including the 30/90/180/365 checkpoints, held-out cohort, preregistration,
+population scale, and allowed claim language, are normative in the [North Star
+specification](memory-v2-north-star.md).
+
+## Outcome replay and bottleneck diagnostics
+
+The [Outcome Replay & Bottleneck Lab](memory-v2-outcome-replay-lab.md) analyzes
+minimized opt-in shadow episodes against offline, single-change oracle variants.
+It attributes paired work-continuity regret to archive/extraction, candidate
+recall, routing, ranking, temporal resolution, packet composition, or answer
+synthesis before a team invests in a learned component.
+
+```bash
+python scripts/memory_v2_outcome_replay.py validate \
+  --dataset plugins/memory/memory_v2/evals/fixtures/outcome_replay_synthetic_v1.yaml
+
+python scripts/memory_v2_outcome_replay.py analyze \
+  --dataset plugins/memory/memory_v2/evals/fixtures/outcome_replay_synthetic_v1.yaml
+```
+
+The bundled dataset is an engineered synthetic rehearsal, not evidence that
+ranking is the real bottleneck. Replay outputs are diagnostic-only, cannot
+support a human-superiority claim, and carry no memory or skill mutation
+authority.
+
+Real pilot pools must pass through the lab's external `collect` command. It
+requires explicit operator attestation, a protected HMAC key, every prior pool
+for disjointness checking, a complete oracle panel, and registered sample-size
+floors by default. It never reads the live Hermes profile and refuses to place
+private intake, keys, or real minimized datasets inside the repository.
+
+## Earn the Canary
+
+The [Earn-the-Canary runbook](memory-v2-earn-canary.md) defines the next
+offline decision study. It compares the same frozen answerer under four
+condition-blinded evidence arms: no memory, bounded raw FTS, bounded Memory v2,
+and bounded operator-selected oracle evidence. The workflow measures paired
+work-continuity improvement, safety and temporal errors, judge agreement,
+blinding diagnostics, cluster uncertainty, and remaining oracle headroom.
+
+The CLI validates preregistration, audits exact disjointness, creates shuffled
+judge packets plus a separate sealed key, and scores frozen judgments:
+
+```bash
+python scripts/memory_v2_earn_canary.py validate --protocol <external-protocol.yaml>
+python scripts/memory_v2_earn_canary.py audit-disjoint \
+  --candidate <external-untouched-pilot-protocol.yaml> \
+  --against <external-development-or-pilot-protocol.yaml> \
+  --output <external-disjointness.json>
+```
+
+Real artifacts remain outside the repository and live Hermes state.
+Development results are ineligible for `go`. An untouched pilot may earn only
+a separately authorized limited answer-injection canary; its report has no
+mutation authority.
+
 ## Command examples
 
 Run the packaged local fixture with all deterministic local baselines:
@@ -82,7 +241,7 @@ python scripts/memory_v2_eval.py \
 Run eval unit tests:
 
 ```bash
-python -m pytest tests/plugins/memory/evals -q
+scripts/run_tests.sh tests/plugins/memory/evals -q
 ```
 
 ## Dogfood status
@@ -122,7 +281,10 @@ Recommended process:
 ## Limitations
 
 - The harness is deterministic and local; it does not measure LLM answer quality or full multi-turn agent behavior.
-- Human-baseline methodology is documented as timed, open-book, source-grounded scoring that does not use fixture answers. It is methodology only until measured human rows are actually collected; do not claim a human, raw-FTS, or Memory-v2 win from methodology text alone.
+- The human-baseline example artifacts demonstrate mechanics in `development`
+  mode only. The harness can validate, blind, and score a study, but no
+  confirmatory human rows have been collected here; do not claim a human,
+  raw-FTS, or Memory-v2 win from methodology or example output alone.
 - Substring scoring can miss semantically correct paraphrases and can over-reward copied text.
 - The fixtures are intentionally small, so passing them is a regression signal, not proof of broad memory quality.
 - Latency numbers are local-machine dependent and should be interpreted as rough smoke signals.

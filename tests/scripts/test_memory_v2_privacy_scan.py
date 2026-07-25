@@ -200,6 +200,10 @@ def test_release_mode_cli_scans_deterministic_scope_and_reports_mode():
     assert payload["mode"] == "memory-v2-release-artifacts"
     assert payload["scan_scope"]["source"] == "mode-default-paths"
     assert payload["finding_count"] == 0
+    assert "scripts/memory_v2_earn_canary.py" in payload["scan_scope"]["paths"]
+    assert "scripts/memory_v2_outcome_replay.py" in payload["scan_scope"]["paths"]
+    assert "docs/memory-v2-earn-canary.md" in payload["scan_scope"]["paths"]
+    assert "docs/memory-v2-outcome-replay-lab.md" in payload["scan_scope"]["paths"]
 
 
 def test_release_mode_cli_fails_on_unmarked_temp_release_artifact(tmp_path):
