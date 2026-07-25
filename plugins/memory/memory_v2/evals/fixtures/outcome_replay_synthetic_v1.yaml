@@ -1,0 +1,197 @@
+schema_version: memory-v2-outcome-replay-dataset/v1
+lab_id: synthetic_ranking_rehearsal_v1
+study_mode: development
+created_at: "2026-07-20T12:00:00Z"
+privacy:
+  collection_mode: opt_in_shadow
+  consent_ref: policy:synthetic-fixture-consent
+  retention_until: "2027-07-20T12:00:00Z"
+  revocation_policy_ref: policy:synthetic-fixture-revocation
+  profile_scope: opaque:aaaaaaaaaaaaaaaa
+  raw_query_stored: false
+  raw_answer_stored: false
+  raw_tool_output_stored: false
+thresholds:
+  bootstrap_samples: 500
+  bootstrap_seed: 7942
+  confidence_level: 0.95
+  minimum_paired_episodes: 4
+  minimum_participant_clusters: 4
+episodes:
+  - episode_id: opaque:e000000000000001
+    participant_ref: opaque:a000000000000001
+    project_ref: opaque:b000000000000001
+    workstream_ref: opaque:c000000000000001
+    query_ref: opaque:d000000000000001
+    query_hash: sha256:0000000000000000000000000000000000000000000000000000000000000001
+    query_class: project_resumption
+    checkpoint_days: 365
+    evidence_cutoff: "2026-06-30T12:00:00Z"
+    snapshot: &snapshot
+      corpus_ref: opaque:f000000000000001
+      archive_digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+      index_digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+      config_digest: sha256:3333333333333333333333333333333333333333333333333333333333333333
+      code_digest: sha256:4444444444444444444444444444444444444444444444444444444444444444
+      answerer_digest: sha256:5555555555555555555555555555555555555555555555555555555555555555
+    variants: &variants
+      - ablation: current
+        changed_component: none
+        replay_artifact_digest: sha256:6000000000000000000000000000000000000000000000000000000000000001
+        offline_side_effects_disabled: true
+        trace: &current_trace
+          route: project_continuity
+          candidate_set_digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
+          ranked_ref_fingerprints:
+            - sha256:7777777777777777777777777777777777777777777777777777777777777777
+            - sha256:8888888888888888888888888888888888888888888888888888888888888888
+          evidence_timestamps:
+            - "2026-06-01T12:00:00Z"
+            - "2026-06-15T12:00:00Z"
+          packet_digest: sha256:9999999999999999999999999999999999999999999999999999999999999999
+          packet_tokens: 200
+          retrieved_count: 2
+          cited_ref_fingerprints:
+            - sha256:7777777777777777777777777777777777777777777777777777777777777777
+          safety_filters_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        outcome: &current_failure
+          work_continuity_success: false
+          label_source: deterministic_harness
+          judgment_ref: judgment:synthetic-current
+          verified_at: "2026-07-01T12:00:00Z"
+          corrections_count: 1
+          rework_seconds: 600
+          latency_ms: 900
+          total_tokens: 700
+          safety_failures: []
+          citation_correct: false
+          stale_conflict_error: false
+      - ablation: oracle_rerank
+        changed_component: ranking
+        replay_artifact_digest: sha256:6000000000000000000000000000000000000000000000000000000000000002
+        offline_side_effects_disabled: true
+        trace: &rerank_trace
+          route: project_continuity
+          candidate_set_digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
+          ranked_ref_fingerprints:
+            - sha256:8888888888888888888888888888888888888888888888888888888888888888
+            - sha256:7777777777777777777777777777777777777777777777777777777777777777
+          evidence_timestamps:
+            - "2026-06-15T12:00:00Z"
+            - "2026-06-01T12:00:00Z"
+          packet_digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          packet_tokens: 200
+          retrieved_count: 2
+          cited_ref_fingerprints:
+            - sha256:8888888888888888888888888888888888888888888888888888888888888888
+          safety_filters_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        outcome: &rerank_success
+          work_continuity_success: true
+          label_source: deterministic_harness
+          judgment_ref: judgment:synthetic-rerank
+          verified_at: "2026-07-01T12:00:00Z"
+          corrections_count: 0
+          rework_seconds: 60
+          latency_ms: 940
+          total_tokens: 710
+          safety_failures: []
+          citation_correct: true
+          stale_conflict_error: false
+      - ablation: oracle_route
+        changed_component: routing
+        replay_artifact_digest: sha256:6000000000000000000000000000000000000000000000000000000000000003
+        offline_side_effects_disabled: true
+        trace:
+          route: deep_recall
+          candidate_set_digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
+          ranked_ref_fingerprints:
+            - sha256:7777777777777777777777777777777777777777777777777777777777777777
+            - sha256:8888888888888888888888888888888888888888888888888888888888888888
+          evidence_timestamps:
+            - "2026-06-01T12:00:00Z"
+            - "2026-06-15T12:00:00Z"
+          packet_digest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+          packet_tokens: 200
+          retrieved_count: 2
+          cited_ref_fingerprints:
+            - sha256:7777777777777777777777777777777777777777777777777777777777777777
+          safety_filters_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        outcome: *current_failure
+      - ablation: no_memory
+        changed_component: memory_contribution
+        replay_artifact_digest: sha256:6000000000000000000000000000000000000000000000000000000000000004
+        offline_side_effects_disabled: true
+        trace: &no_memory_trace
+          route: no_memory_needed
+          candidate_set_digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+          ranked_ref_fingerprints: []
+          evidence_timestamps: []
+          packet_digest: sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+          packet_tokens: 0
+          retrieved_count: 0
+          cited_ref_fingerprints: []
+          safety_filters_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        outcome: *current_failure
+      - ablation: oracle_archive
+        changed_component: archive_extraction
+        replay_artifact_digest: sha256:6000000000000000000000000000000000000000000000000000000000000005
+        offline_side_effects_disabled: true
+        trace: *current_trace
+        outcome: *current_failure
+      - ablation: oracle_candidate
+        changed_component: candidate_recall
+        replay_artifact_digest: sha256:6000000000000000000000000000000000000000000000000000000000000006
+        offline_side_effects_disabled: true
+        trace: *current_trace
+        outcome: *current_failure
+      - ablation: oracle_temporal
+        changed_component: temporal_resolution
+        replay_artifact_digest: sha256:6000000000000000000000000000000000000000000000000000000000000007
+        offline_side_effects_disabled: true
+        trace: *current_trace
+        outcome: *current_failure
+      - ablation: oracle_packet
+        changed_component: packet_composition
+        replay_artifact_digest: sha256:6000000000000000000000000000000000000000000000000000000000000008
+        offline_side_effects_disabled: true
+        trace: *current_trace
+        outcome: *current_failure
+      - ablation: oracle_synthesis
+        changed_component: answer_synthesis
+        replay_artifact_digest: sha256:6000000000000000000000000000000000000000000000000000000000000009
+        offline_side_effects_disabled: true
+        trace: *current_trace
+        outcome: *current_failure
+  - episode_id: opaque:e000000000000002
+    participant_ref: opaque:a000000000000002
+    project_ref: opaque:b000000000000002
+    workstream_ref: opaque:c000000000000002
+    query_ref: opaque:d000000000000002
+    query_hash: sha256:0000000000000000000000000000000000000000000000000000000000000002
+    query_class: current_state
+    checkpoint_days: 365
+    evidence_cutoff: "2026-06-30T12:00:00Z"
+    snapshot: *snapshot
+    variants: *variants
+  - episode_id: opaque:e000000000000003
+    participant_ref: opaque:a000000000000003
+    project_ref: opaque:b000000000000003
+    workstream_ref: opaque:c000000000000003
+    query_ref: opaque:d000000000000003
+    query_hash: sha256:0000000000000000000000000000000000000000000000000000000000000003
+    query_class: source_rationale
+    checkpoint_days: 365
+    evidence_cutoff: "2026-06-30T12:00:00Z"
+    snapshot: *snapshot
+    variants: *variants
+  - episode_id: opaque:e000000000000004
+    participant_ref: opaque:a000000000000004
+    project_ref: opaque:b000000000000004
+    workstream_ref: opaque:c000000000000004
+    query_ref: opaque:d000000000000004
+    query_hash: sha256:0000000000000000000000000000000000000000000000000000000000000004
+    query_class: correction_contradiction
+    checkpoint_days: 365
+    evidence_cutoff: "2026-06-30T12:00:00Z"
+    snapshot: *snapshot
+    variants: *variants
