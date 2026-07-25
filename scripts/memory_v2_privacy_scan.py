@@ -184,6 +184,7 @@ RELEASE_ARTIFACT_PATHS = tuple(
         "docs/memory-v2-archive-release-checklist.md",
         "docs/memory-v2-earn-canary.md",
         "docs/memory-v2-evals.md",
+        "docs/memory-v2-hybrid-packaging.md",
         "docs/memory-v2-human-baseline-pilot.md",
         "docs/memory-v2-north-star.md",
         "docs/memory-v2-outcome-replay-lab.md",

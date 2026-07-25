@@ -16,6 +16,10 @@ The [North Star specification](../../../docs/memory-v2-north-star.md) defines th
 
 The [offline shadow-retrieval path](../../../docs/memory-v2-shadow-retrieval.md) composes memory-need routing, corpus hygiene, workstream-scoped hybrid retrieval, local-model abstention, and exact evidence bundles. It is disabled by default and is not connected to the live provider.
 
+The [hybrid packaging boundary](../../../docs/memory-v2-hybrid-packaging.md)
+keeps development in the Hermes fork while enforcing an import-isolated,
+machine-manifested portable core for later extraction into a standalone plugin.
+
 The [Earn-the-Canary study](../../../docs/memory-v2-earn-canary.md) defines the
 private, opt-in, four-arm longitudinal gate across no memory, raw FTS, Memory
 v2, and operator-selected oracle evidence. It uses blinded judging and a

@@ -1,0 +1,27 @@
+{
+  "schema_version": "memory-v2-portable-manifest/v1",
+  "package_name": "memory-v2-core",
+  "status": "hybrid-development",
+  "adapter_entrypoint": "__init__.py",
+  "portable_modules": [
+    "redaction",
+    "scoped_retrieval",
+    "shadow_intent",
+    "shadow_pipeline",
+    "shadow_reranker",
+    "skill_registry",
+    "workstream_evidence"
+  ],
+  "forbidden_import_prefixes": [
+    "agent",
+    "gateway",
+    "hermes_cli",
+    "hermes_constants",
+    "hermes_state",
+    "model_tools",
+    "plugins",
+    "providers",
+    "run_agent",
+    "tools"
+  ]
+}
