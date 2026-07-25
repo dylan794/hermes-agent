@@ -1,0 +1,76 @@
+# One synthetic judge-row example for seed 17. Tests construct the complete
+# two-judge panel in memory so this public fixture stays compact.
+schema_version: memory-v2-earn-canary-judgments/v1
+study_id: earn_canary_synthetic_mechanics_v1
+packet_set_fingerprint: sha256:d628c44658315fe38abba62a68df259236854f9a5ba265b4c09ddada2c795ca2
+judgments:
+  - packet_id: packet:762ed7e6b67d4aabb3296142
+    judge_id: opaque:0000000100000001
+    judge_role: primary
+    scores:
+      A:
+        factual_correctness: 2
+        temporal_correctness: 2
+        completeness: 2
+        source_grounding: 2
+        actionability: 2
+        calibration_restraint: 2
+      B:
+        factual_correctness: 2
+        temporal_correctness: 2
+        completeness: 2
+        source_grounding: 2
+        actionability: 2
+        calibration_restraint: 2
+      C:
+        factual_correctness: 5
+        temporal_correctness: 5
+        completeness: 5
+        source_grounding: 5
+        actionability: 5
+        calibration_restraint: 5
+      D:
+        factual_correctness: 5
+        temporal_correctness: 5
+        completeness: 5
+        source_grounding: 5
+        actionability: 5
+        calibration_restraint: 5
+    gate_failures:
+      A: []
+      B: []
+      C: []
+      D: []
+    condition_guesses:
+      A: raw_fts
+      B: no_memory
+      C: memory_v2
+      D: oracle_evidence
+    guess_confidence:
+      A: low
+      B: low
+      C: low
+      D: low
+    material_error_notes:
+      A: null
+      B: null
+      C: null
+      D: null
+    potentially_identifiable:
+      A: false
+      B: false
+      C: false
+      D: false
+    failure_taxonomy:
+      A:
+        primary: candidate_recall
+        secondary: null
+        label_source: independent_judge
+        judgment_ref: judgment:synthetic-fixture
+      B:
+        primary: candidate_recall
+        secondary: null
+        label_source: independent_judge
+        judgment_ref: judgment:synthetic-fixture
+      C: null
+      D: null

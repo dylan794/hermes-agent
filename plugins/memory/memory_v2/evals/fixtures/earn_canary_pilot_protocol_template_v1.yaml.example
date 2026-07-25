@@ -1,0 +1,122 @@
+# Deliberately non-runnable template. Copy outside the repository, replace
+# every REPLACE marker, preregister it, and keep the completed file private.
+schema_version: memory-v2-earn-canary-protocol/v1
+study_id: REPLACE_WITH_OPAQUE_PILOT_ID
+study_mode: pilot
+created_at: "REPLACE_WITH_TIMEZONE_AWARE_TIMESTAMP"
+privacy:
+  collection_mode: opt_in_shadow
+  consent_ref: REPLACE_WITH_CONSENT_ARTIFACT_REFERENCE
+  retention_until: "REPLACE_WITH_TIMEZONE_AWARE_TIMESTAMP"
+  revocation_policy_ref: REPLACE_WITH_REVOCATION_POLICY_REFERENCE
+  identity_namespace_digest: REPLACE_WITH_SHA256_DIGEST
+  raw_work_evidence_stored: false
+design:
+  conditions:
+    - no_memory
+    - raw_fts
+    - memory_v2
+    - oracle_evidence
+  slots:
+    - A
+    - B
+    - C
+    - D
+  dimensions:
+    - factual_correctness
+    - temporal_correctness
+    - completeness
+    - source_grounding
+    - actionability
+    - calibration_restraint
+  minimum_dimension_score: 3
+  primary_comparisons:
+    - memory_v2_vs_no_memory
+    - memory_v2_vs_raw_fts
+    - raw_fts_vs_no_memory
+    - oracle_evidence_vs_memory_v2
+  # Commit to the canonical seed object before opening pilot responses:
+  # sha256(canonical_json({"seed": REVEALED_INTEGER})).
+  blinding_seed_commitment: REPLACE_WITH_SHA256_DIGEST
+  rubric_digest: REPLACE_WITH_SHA256_DIGEST
+  judge_instructions_digest: REPLACE_WITH_SHA256_DIGEST
+  judge_calibration_digest: REPLACE_WITH_SHA256_DIGEST
+  adjudication_policy_digest: REPLACE_WITH_SHA256_DIGEST
+  packet_renderer_digest: REPLACE_WITH_SHA256_DIGEST
+thresholds:
+  # Freeze power-derived values before opening any pilot response.
+  minimum_episodes: 500
+  minimum_participant_clusters: 30
+  minimum_project_clusters: 20
+  minimum_effective_participant_clusters: 20
+  minimum_effective_project_clusters: 15
+  minimum_participant_clusters_per_stratum: 10
+  minimum_project_clusters_per_stratum: 8
+  minimum_shadow_eligible_records: 50
+  max_participant_episode_share: REPLACE_WITH_PREREGISTERED_RATE
+  max_project_episode_share: REPLACE_WITH_PREREGISTERED_RATE
+  minimum_episodes_per_checkpoint: 25
+  minimum_episodes_per_query_class: 25
+  required_checkpoints:
+    - 30
+    - 90
+    - 365
+  required_query_classes:
+    - current_state
+    - historical_state
+    - source_rationale
+    - project_resumption
+    - open_loop
+    - procedure
+    - correction_contradiction
+    - suppression_abstention
+  bootstrap_samples: 10000
+  bootstrap_seed: REPLACE_WITH_SEALED_INTEGER
+  confidence_level: 0.95
+  uplift_margin_vs_no_memory: REPLACE_WITH_PREREGISTERED_RATE
+  uplift_margin_vs_raw_fts: REPLACE_WITH_PREREGISTERED_RATE
+  stratum_noninferiority_margin: -0.05
+  max_oracle_gap: REPLACE_WITH_PREREGISTERED_RATE
+  max_irrelevant_injection_rate: REPLACE_WITH_PREREGISTERED_RATE
+  max_stale_as_current_rate: REPLACE_WITH_PREREGISTERED_RATE
+  min_citation_validity_rate: REPLACE_WITH_PREREGISTERED_RATE
+  min_judge_agreement: REPLACE_WITH_PREREGISTERED_RATE
+  min_judge_kappa: REPLACE_WITH_PREREGISTERED_RATE
+  max_identifiable_rate: REPLACE_WITH_PREREGISTERED_RATE
+  max_condition_guess_accuracy: REPLACE_WITH_PREREGISTERED_RATE
+  max_p95_latency_ms: REPLACE_WITH_PREREGISTERED_BOUND
+  max_mean_tokens: REPLACE_WITH_PREREGISTERED_BOUND
+  min_top1_useful: REPLACE_WITH_PREREGISTERED_RATE
+  min_evidence_completeness: REPLACE_WITH_PREREGISTERED_RATE
+  min_none_precision: REPLACE_WITH_PREREGISTERED_RATE
+  min_none_recall: REPLACE_WITH_PREREGISTERED_RATE
+episodes:
+  # Repeat this strict record for every disjoint, opted-in episode. Opaque
+  # references and query hashes must come from the protected cross-pool HMAC.
+  - episode_id: REPLACE_WITH_OPAQUE_REFERENCE
+    participant_ref: REPLACE_WITH_OPAQUE_REFERENCE
+    project_ref: REPLACE_WITH_OPAQUE_REFERENCE
+    workstream_ref: REPLACE_WITH_OPAQUE_REFERENCE
+    query_ref: REPLACE_WITH_OPAQUE_REFERENCE
+    query_hash: REPLACE_WITH_SHA256_DIGEST
+    query_class: REPLACE_WITH_REGISTERED_QUERY_CLASS
+    checkpoint_days: REPLACE_WITH_INTEGER
+    consent_receipt_digest: REPLACE_WITH_SHA256_DIGEST
+    query_as_of: "REPLACE_WITH_TIMEZONE_AWARE_TIMESTAMP"
+    target_evidence_at: "REPLACE_WITH_TIMEZONE_AWARE_TIMESTAMP"
+    evidence_cutoff: "REPLACE_WITH_TIMEZONE_AWARE_TIMESTAMP"
+    prompt: REPLACE_WITH_PRIVATE_QUERY
+    evidence_pack_ref: REPLACE_WITH_EXTERNAL_EVIDENCE_PACK_REFERENCE
+    condition_input_digests:
+      no_memory: REPLACE_WITH_SHA256_DIGEST
+      raw_fts: REPLACE_WITH_SHA256_DIGEST
+      memory_v2: REPLACE_WITH_SHA256_DIGEST
+      oracle_evidence: REPLACE_WITH_SHA256_DIGEST
+    snapshot:
+      corpus_ref: REPLACE_WITH_OPAQUE_REFERENCE
+      archive_digest: REPLACE_WITH_SHA256_DIGEST
+      index_digest: REPLACE_WITH_SHA256_DIGEST
+      config_digest: REPLACE_WITH_SHA256_DIGEST
+      code_digest: REPLACE_WITH_SHA256_DIGEST
+      answerer_digest: REPLACE_WITH_SHA256_DIGEST
+      safety_filters_digest: REPLACE_WITH_SHA256_DIGEST
