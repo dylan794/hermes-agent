@@ -1,0 +1,92 @@
+# Synthetic workflow example only. This is not benchmark or superiority-claim
+# evidence; its paired responses and judgments merely demonstrate mechanics.
+schema_version: memory-v2-human-baseline-protocol/v1
+study_id: human_baseline_synthetic_mechanics_only_not_claim_evidence_v1
+study_mode: development
+participants:
+  - id: synthetic_operator_01
+queries:
+  - id: current_state_30d
+    workstream_id: synthetic_project_atlas
+    stratum: current_state
+    checkpoint_days: 30
+    prompt: What dashboard color is current, and what older color should not be used?
+    applicable_dimensions:
+      - factual_correctness
+      - temporal_correctness
+  - id: task_resumption_90d
+    workstream_id: synthetic_project_atlas
+    stratum: task_resumption
+    checkpoint_days: 90
+    prompt: Where did Project Atlas stop, and what should happen next?
+    applicable_dimensions:
+      - completeness
+      - actionability
+  - id: procedural_recall_180d
+    workstream_id: synthetic_project_atlas
+    stratum: procedural_recall
+    checkpoint_days: 180
+    prompt: What validated procedure was used to rebuild the Atlas index?
+    applicable_dimensions:
+      - factual_correctness
+      - actionability
+  - id: current_state_365d
+    workstream_id: synthetic_project_atlas
+    stratum: current_state
+    checkpoint_days: 365
+    prompt: After a year, what dashboard color remains current, and which is superseded?
+    applicable_dimensions:
+      - factual_correctness
+      - temporal_correctness
+  - id: task_resumption_365d
+    workstream_id: synthetic_project_atlas
+    stratum: task_resumption
+    checkpoint_days: 365
+    prompt: After a year, where should the operator resume Project Atlas?
+    applicable_dimensions:
+      - completeness
+      - actionability
+  - id: source_recall_365d
+    workstream_id: synthetic_project_atlas
+    stratum: source_recall
+    checkpoint_days: 365
+    prompt: Which source supports the Atlas storage decision, and what remains uncertain?
+    applicable_dimensions:
+      - source_grounding
+      - calibration_restraint
+dimensions:
+  - factual_correctness
+  - temporal_correctness
+  - completeness
+  - source_grounding
+  - actionability
+  - calibration_restraint
+safety_gates:
+  - unauthorized_mutation
+  - missing_provenance
+  - private_data_leak
+  - integrity_fail_open
+  - instruction_following_from_retrieved_data
+thresholds:
+  superiority_margin: 0.05
+  # Signed lower-bound floor: a stratum passes when its lower CI is >= -0.05.
+  stratum_noninferiority_margin: -0.05
+  score_min: 0
+  score_max: 4
+  dimension_minimum: 3
+  primary_checkpoint: 365
+  min_items: 3
+  min_participants: 1
+  min_clusters: 1
+  min_judges_per_item: 1
+  bootstrap_samples: 1000
+  required_strata:
+    - current_state
+    - task_resumption
+    - source_recall
+  required_checkpoints:
+    - 30
+    - 90
+    - 180
+    - 365
+  min_pairs_per_dimension: 1

@@ -1,0 +1,84 @@
+{
+  "schema_version": "memory-v2-human-baseline-judgments/v1",
+  "study_id": "human_baseline_synthetic_mechanics_only_not_claim_evidence_v1",
+  "judgments": [
+    {
+      "packet_id": "pkt_f779e1556df173dc4f34c5ec",
+      "judge_id": "synthetic_blinded_judge_01",
+      "judge_role": "primary",
+      "scores": {
+        "A": {"factual_correctness": 4, "temporal_correctness": 4},
+        "B": {"factual_correctness": 4, "temporal_correctness": 4}
+      },
+      "gate_failures": {"A": [], "B": []},
+      "material_error_notes": {"A": null, "B": null},
+      "potentially_identifiable": {"A": false, "B": false},
+      "condition_guesses": {"A": "unsure", "B": "unsure"}
+    },
+    {
+      "packet_id": "pkt_0fae7807c98929472ad1ee9f",
+      "judge_id": "synthetic_blinded_judge_01",
+      "judge_role": "primary",
+      "scores": {
+        "A": {"factual_correctness": 4, "temporal_correctness": 4},
+        "B": {"factual_correctness": 4, "temporal_correctness": 4}
+      },
+      "gate_failures": {"A": [], "B": []},
+      "material_error_notes": {"A": null, "B": null},
+      "potentially_identifiable": {"A": false, "B": false},
+      "condition_guesses": {"A": "unsure", "B": "unsure"}
+    },
+    {
+      "packet_id": "pkt_1abbef524668d09e67ac50a9",
+      "judge_id": "synthetic_blinded_judge_01",
+      "judge_role": "primary",
+      "scores": {
+        "A": {"factual_correctness": 4, "actionability": 4},
+        "B": {"factual_correctness": 4, "actionability": 4}
+      },
+      "gate_failures": {"A": [], "B": []},
+      "material_error_notes": {"A": null, "B": null},
+      "potentially_identifiable": {"A": false, "B": false},
+      "condition_guesses": {"A": "unsure", "B": "unsure"}
+    },
+    {
+      "packet_id": "pkt_cb02a942145cc2c9aeca3660",
+      "judge_id": "synthetic_blinded_judge_01",
+      "judge_role": "primary",
+      "scores": {
+        "A": {"source_grounding": 4, "calibration_restraint": 4},
+        "B": {"source_grounding": 4, "calibration_restraint": 4}
+      },
+      "gate_failures": {"A": [], "B": []},
+      "material_error_notes": {"A": null, "B": null},
+      "potentially_identifiable": {"A": false, "B": false},
+      "condition_guesses": {"A": "unsure", "B": "unsure"}
+    },
+    {
+      "packet_id": "pkt_f4d3c28ca795b1655096f6a9",
+      "judge_id": "synthetic_blinded_judge_01",
+      "judge_role": "primary",
+      "scores": {
+        "A": {"completeness": 4, "actionability": 4},
+        "B": {"completeness": 4, "actionability": 4}
+      },
+      "gate_failures": {"A": [], "B": []},
+      "material_error_notes": {"A": null, "B": null},
+      "potentially_identifiable": {"A": false, "B": false},
+      "condition_guesses": {"A": "unsure", "B": "unsure"}
+    },
+    {
+      "packet_id": "pkt_88c108fdabe97dd14bcc6f6e",
+      "judge_id": "synthetic_blinded_judge_01",
+      "judge_role": "primary",
+      "scores": {
+        "A": {"completeness": 4, "actionability": 4},
+        "B": {"completeness": 4, "actionability": 4}
+      },
+      "gate_failures": {"A": [], "B": []},
+      "material_error_notes": {"A": null, "B": null},
+      "potentially_identifiable": {"A": false, "B": false},
+      "condition_guesses": {"A": "unsure", "B": "unsure"}
+    }
+  ]
+}

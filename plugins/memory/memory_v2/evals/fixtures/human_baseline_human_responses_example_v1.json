@@ -1,0 +1,42 @@
+{
+  "schema_version": "memory-v2-human-baseline-responses/v1",
+  "study_id": "human_baseline_synthetic_mechanics_only_not_claim_evidence_v1",
+  "responses": [
+    {
+      "participant_id": "synthetic_operator_01",
+      "query_id": "current_state_30d",
+      "condition": "human",
+      "response": "The current color is blue; green is the older superseded preference."
+    },
+    {
+      "participant_id": "synthetic_operator_01",
+      "query_id": "task_resumption_90d",
+      "condition": "human",
+      "response": "Atlas stopped after the deterministic-eval decision. Next, run the longitudinal scorecard."
+    },
+    {
+      "participant_id": "synthetic_operator_01",
+      "query_id": "procedural_recall_180d",
+      "condition": "human",
+      "response": "Validate the raw chain, rebuild into a staged SQLite file, verify parity, then atomically replace the index."
+    },
+    {
+      "participant_id": "synthetic_operator_01",
+      "query_id": "current_state_365d",
+      "condition": "human",
+      "response": "Blue remains current after a year; green is superseded history."
+    },
+    {
+      "participant_id": "synthetic_operator_01",
+      "query_id": "task_resumption_365d",
+      "condition": "human",
+      "response": "Resume by running and reviewing the Atlas longitudinal scorecard."
+    },
+    {
+      "participant_id": "synthetic_operator_01",
+      "query_id": "source_recall_365d",
+      "condition": "human",
+      "response": "Synthetic event atlas_decision_07 supports the storage decision. The benchmark outcome is not established."
+    }
+  ]
+}

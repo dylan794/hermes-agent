@@ -1,0 +1,42 @@
+{
+  "schema_version": "memory-v2-human-baseline-responses/v1",
+  "study_id": "human_baseline_synthetic_mechanics_only_not_claim_evidence_v1",
+  "responses": [
+    {
+      "participant_id": "synthetic_operator_01",
+      "query_id": "current_state_30d",
+      "condition": "memory_v2",
+      "response": "Blue is current. Green is retained only as superseded history."
+    },
+    {
+      "participant_id": "synthetic_operator_01",
+      "query_id": "task_resumption_90d",
+      "condition": "memory_v2",
+      "response": "Project Atlas last recorded the deterministic-eval decision; the next open action is to run its longitudinal scorecard."
+    },
+    {
+      "participant_id": "synthetic_operator_01",
+      "query_id": "procedural_recall_180d",
+      "condition": "memory_v2",
+      "response": "Verify the append-only raw chain, build and validate a staged SQLite index, check retrieval parity, and replace atomically."
+    },
+    {
+      "participant_id": "synthetic_operator_01",
+      "query_id": "current_state_365d",
+      "condition": "memory_v2",
+      "response": "Blue remains current at 365 days. Green is labeled as superseded history."
+    },
+    {
+      "participant_id": "synthetic_operator_01",
+      "query_id": "task_resumption_365d",
+      "condition": "memory_v2",
+      "response": "The current open Atlas action is to run and review the longitudinal scorecard."
+    },
+    {
+      "participant_id": "synthetic_operator_01",
+      "query_id": "source_recall_365d",
+      "condition": "memory_v2",
+      "response": "The storage decision cites synthetic event atlas_decision_07. No measured comparison is present."
+    }
+  ]
+}
