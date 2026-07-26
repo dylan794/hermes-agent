@@ -77,6 +77,7 @@ _METRIC_RESULT_KEYS = {
     "ranked_candidates",
     "bundle",
     "filter_counts",
+    "filter_reason_counts",
     "adapter",
     "latency_ms",
 }
@@ -117,6 +118,20 @@ _METRIC_FILTER_KEYS = {
     "future",
     "temporal",
     "overflow",
+}
+_METRIC_FILTER_REASON_KEYS = {
+    "candidate_schema",
+    "candidate_identity",
+    "candidate_content",
+    "candidate_policy",
+    "candidate_scope",
+    "candidate_provenance",
+    "citation_schema",
+    "citation_provenance",
+    "citation_span",
+    "citation_source",
+    "timestamp",
+    "other",
 }
 _METRIC_ADAPTER_KEYS = {
     "status",
@@ -255,7 +270,7 @@ class ShadowUtilityReranker:
                 adapter_status="not_called",
             )
 
-        accepted, filter_counts = self._filter_candidates(
+        accepted, filter_counts, filter_reason_counts = self._filter_candidates(
             candidates,
             validated_context,
             citation_sources=citation_sources,
@@ -268,6 +283,7 @@ class ShadowUtilityReranker:
                 adapter_status="not_called",
             )
             result["filter_counts"] = filter_counts
+            result["filter_reason_counts"] = filter_reason_counts
             return result
 
         deterministic_scores = {
@@ -295,6 +311,7 @@ class ShadowUtilityReranker:
                         adapter_status=adapter_status,
                     )
                     result["filter_counts"] = filter_counts
+                    result["filter_reason_counts"] = filter_reason_counts
                     return result
                 ranking_source = "deterministic_fallback"
             else:
@@ -322,6 +339,7 @@ class ShadowUtilityReranker:
                             adapter_elapsed_ms=adapter_elapsed_ms,
                         )
                         result["filter_counts"] = filter_counts
+                        result["filter_reason_counts"] = filter_reason_counts
                         return result
                     scores = deterministic_scores
                     ranking_source = "deterministic_fallback"
@@ -335,6 +353,7 @@ class ShadowUtilityReranker:
                 adapter_elapsed_ms=adapter_elapsed_ms,
             )
             result["filter_counts"] = filter_counts
+            result["filter_reason_counts"] = filter_reason_counts
             result["ranking_source"] = ranking_source
             return result
 
@@ -379,6 +398,7 @@ class ShadowUtilityReranker:
             "ranked_candidates": ranked_public,
             "bundle": bundle,
             "filter_counts": filter_counts,
+            "filter_reason_counts": filter_reason_counts,
             "adapter": {
                 "status": adapter_status,
                 "artifact_digest": (
@@ -396,7 +416,7 @@ class ShadowUtilityReranker:
         context: Mapping[str, Any],
         *,
         citation_sources: Mapping[tuple[str, str], str] | None,
-    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, int]]:
         counts = {
             "accepted": 0,
             "invalid": 0,
@@ -406,6 +426,7 @@ class ShadowUtilityReranker:
             "temporal": 0,
             "overflow": max(0, len(candidates) - int(self.config.max_candidates)),
         }
+        reason_counts = self._empty_filter_reason_counts()
         accepted: list[dict[str, Any]] = []
         query_workstreams = set(context["workstream_ids"])
         allow_unknown = bool(context["allow_unknown_workstream"])
@@ -418,8 +439,9 @@ class ShadowUtilityReranker:
                     raw,
                     citation_sources=citation_sources,
                 )
-            except (ShadowRerankerError, TypeError, ValueError):
+            except (ShadowRerankerError, TypeError, ValueError) as exc:
                 counts["invalid"] += 1
+                reason_counts[self._invalid_candidate_reason(exc)] += 1
                 continue
             if item["profile_id"] != context["profile_id"]:
                 counts["profile"] += 1
@@ -467,7 +489,53 @@ class ShadowUtilityReranker:
             ]
             counts["overflow"] += overflow
         counts["accepted"] = len(accepted)
-        return accepted, counts
+        return accepted, counts, reason_counts
+
+    @staticmethod
+    def _empty_filter_reason_counts() -> dict[str, int]:
+        return {
+            key: 0
+            for key in sorted(_METRIC_FILTER_REASON_KEYS)
+        }
+
+    @staticmethod
+    def _invalid_candidate_reason(exc: Exception) -> str:
+        message = str(exc).lower()
+        if "candidate does not match its strict schema" in message:
+            return "candidate_schema"
+        if "candidate id" in message or "candidate type" in message:
+            return "candidate_identity"
+        if "candidate snippet" in message:
+            return "candidate_content"
+        if (
+            "candidate profile" in message
+            or "candidate status" in message
+            or "evidence role" in message
+            or "candidate verified" in message
+        ):
+            return "candidate_policy"
+        if "candidate workstreams" in message:
+            return "candidate_scope"
+        if "candidate source_refs" in message or "candidate citations" in message:
+            return "candidate_provenance"
+        if "citation does not match its strict schema" in message:
+            return "citation_schema"
+        if (
+            "citation source is absent" in message
+            or "citation and candidate evidence timestamps disagree" in message
+        ):
+            return "citation_provenance"
+        if "citation is not an exact bounded span" in message:
+            return "citation_span"
+        if "citation field or text" in message:
+            return "citation_source"
+        if "citation source text is unavailable" in message or (
+            "citation does not match its trusted source text" in message
+        ):
+            return "citation_source"
+        if "timestamp" in message or "evidence_at" in message:
+            return "timestamp"
+        return "other"
 
     @staticmethod
     def _validate_context(context: Mapping[str, Any]) -> dict[str, Any]:
@@ -958,6 +1026,7 @@ class ShadowUtilityReranker:
                 "temporal": 0,
                 "overflow": 0,
             },
+            "filter_reason_counts": self._empty_filter_reason_counts(),
             "adapter": {
                 "status": adapter_status,
                 "artifact_digest": "",
@@ -1217,6 +1286,7 @@ def _validate_metric_result(raw: Any) -> dict[str, Any]:
     }:
         raise ShadowRerankerError("metric ranking_source is invalid")
     _validate_metric_counts(raw.get("filter_counts"))
+    _validate_metric_reason_counts(raw.get("filter_reason_counts"))
     _validate_metric_adapter(raw.get("adapter"))
     latency = _metric_number(raw.get("latency_ms"), "latency_ms", minimum=0.0)
     return {
@@ -1408,6 +1478,20 @@ def _validate_metric_counts(raw: Any) -> None:
         for value in raw.values()
     ):
         raise ShadowRerankerError("metric filter counts are invalid")
+
+
+def _validate_metric_reason_counts(raw: Any) -> None:
+    if not isinstance(raw, Mapping) or set(raw) != _METRIC_FILTER_REASON_KEYS:
+        raise ShadowRerankerError(
+            "metric filter reason counts do not match strict schema"
+        )
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= _MAX_METRIC_SOURCE_IDS
+        for value in raw.values()
+    ):
+        raise ShadowRerankerError("metric filter reason counts are invalid")
 
 
 def _validate_metric_adapter(raw: Any) -> None:

@@ -459,6 +459,13 @@ resolution, packet composition, or answer synthesis is the largest safe
 performance gap. It is diagnostic-only and never replays side effects or grants
 mutation authority.
 
+Use the
+[owner diagnostic set](../../../docs/memory-v2-owner-diagnostic-set.md) first
+when real shadow episodes have not yet been labeled. It prepares an external
+private packet with eight control candidates and a frozen chronological
+holdout, records content-free filter-reason counts, and refuses to score
+pending owner labels.
+
 Memory v2 includes a deterministic local eval harness under:
 
 ```text

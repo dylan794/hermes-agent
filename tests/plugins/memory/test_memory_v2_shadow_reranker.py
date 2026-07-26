@@ -464,6 +464,24 @@ def test_invalid_candidate_schema_or_citation_is_rejected_safely():
 
     assert result["decision"]["selected"] == "none"
     assert result["filter_counts"]["invalid"] == 1
+    assert result["filter_reason_counts"]["candidate_schema"] == 1
+    assert sum(result["filter_reason_counts"].values()) == 1
+
+
+def test_invalid_scope_has_a_content_free_reason_code():
+    invalid = _candidate(
+        "bad-scope",
+        "Looks relevant",
+        workstream_ids=[f"workstream-{index}" for index in range(9)],
+    )
+
+    result = ShadowUtilityReranker(_enabled()).run(
+        "Looks relevant", [invalid], _context(workstream_ids=[])
+    )
+
+    assert result["filter_counts"]["invalid"] == 1
+    assert result["filter_reason_counts"]["candidate_scope"] == 1
+    assert sum(result["filter_reason_counts"].values()) == 1
 
 
 def test_metrics_cover_utility_abstention_evidence_temporal_citations_and_latency():

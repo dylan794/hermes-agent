@@ -201,9 +201,11 @@ def test_release_mode_cli_scans_deterministic_scope_and_reports_mode():
     assert payload["scan_scope"]["source"] == "mode-default-paths"
     assert payload["finding_count"] == 0
     assert "scripts/memory_v2_earn_canary.py" in payload["scan_scope"]["paths"]
+    assert "scripts/memory_v2_diagnostic_set.py" in payload["scan_scope"]["paths"]
     assert "scripts/memory_v2_outcome_replay.py" in payload["scan_scope"]["paths"]
     assert "docs/memory-v2-earn-canary.md" in payload["scan_scope"]["paths"]
     assert "docs/memory-v2-hybrid-packaging.md" in payload["scan_scope"]["paths"]
+    assert "docs/memory-v2-owner-diagnostic-set.md" in payload["scan_scope"]["paths"]
     assert "docs/memory-v2-outcome-replay-lab.md" in payload["scan_scope"]["paths"]
 
 

@@ -183,6 +183,13 @@ for disjointness checking, a complete oracle panel, and registered sample-size
 floors by default. It never reads the live Hermes profile and refuses to place
 private intake, keys, or real minimized datasets inside the repository.
 
+Before constructing oracle variants, use the
+[owner diagnostic set](memory-v2-owner-diagnostic-set.md) to freeze a private
+30-episode development packet, collect exact owner labels, and preserve a
+chronological held-out third. Its content-free score identifies which
+single-change Outcome Replay variants are worth constructing; it cannot stand
+in for verified replay outcomes.
+
 ## Earn the Canary
 
 The [Earn-the-Canary runbook](memory-v2-earn-canary.md) defines the next

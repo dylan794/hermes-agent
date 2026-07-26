@@ -128,6 +128,11 @@ operator-labeled replay demonstrates all of the following:
 Metrics with no eligible labeled cases are reported as unavailable, not as
 perfect scores, and include explicit coverage/eligibility fields.
 
+Shadow results expose both aggregate hard-filter counts and bounded,
+content-free rejection-reason counts. Candidate scope is projected into the
+reranker's eight-ID contract before validation; an over-wide derived scope is
+never allowed to turn into a generic invalid candidate.
+
 Even after those gates pass, automatic promotion, automatic supersession,
 broad raw prefetch, and model-driven promotion remain separate decisions and
 stay disabled.

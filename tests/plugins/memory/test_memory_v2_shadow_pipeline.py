@@ -11,6 +11,7 @@ from plugins.memory.memory_v2.shadow_pipeline import (
     ShadowRetrievalPipeline,
 )
 from plugins.memory.memory_v2.shadow_reranker import ShadowRerankerConfig
+from plugins.memory.memory_v2.workstream_evidence import EvidenceNode, EvidenceSpan
 
 
 ADAPTER_DIGEST = "sha256:" + ("b" * 64)
@@ -214,6 +215,40 @@ def test_query_scope_is_projected_into_search_budget(tmp_path):
     assert len(query_scope["project_ids"]) + len(query_scope["workstream_ids"]) == 8
     assert "project:project-00" in query_scope["project_ids"]
     assert "workstream:critical-workstream" in query_scope["workstream_ids"]
+
+
+def test_candidate_scope_is_projected_into_reranker_budget():
+    node = EvidenceNode(
+        id="many-scope-node",
+        kind="decision",
+        text="Use bounded retrieval scope projection.",
+        role="user",
+        observed_at="2026-05-01T10:00:00Z",
+        session_id="session-a",
+        source_refs=("many-scope-event",),
+        evidence_spans=(
+            EvidenceSpan(
+                source_id="many-scope-event",
+                field="user_content",
+                role="user",
+                start=0,
+                end=39,
+                text="Use bounded retrieval scope projection.",
+            ),
+        ),
+        project_ids=tuple(f"project:{index:02d}" for index in range(12)),
+        workstream_ids=tuple(f"workstream:{index:02d}" for index in range(4)),
+    )
+
+    candidate = ShadowRetrievalPipeline._reranker_candidate(
+        {"status": "current"},
+        node,
+        "profile-a",
+    )
+
+    assert len(candidate["workstream_ids"]) == 8
+    assert "project:00" in candidate["workstream_ids"]
+    assert "workstream:00" in candidate["workstream_ids"]
 
 
 def test_future_evidence_is_suppressed(tmp_path):

@@ -710,9 +710,26 @@ class ShadowRetrievalPipeline:
             }
             for span in node.evidence_spans
         ]
-        workstreams = list(
-            dict.fromkeys([*node.project_ids, *node.workstream_ids])
+        projects = list(dict.fromkeys(node.project_ids))
+        workstream_ids = list(dict.fromkeys(node.workstream_ids))
+        workstreams: list[str] = []
+        if projects:
+            workstreams.append(projects.pop(0))
+        if workstream_ids and len(workstreams) < MAX_QUERY_SCOPE_IDS:
+            workstreams.append(workstream_ids.pop(0))
+        remaining = [
+            item
+            for pair in zip(projects, workstream_ids)
+            for item in pair
+        ]
+        remaining.extend(projects[len(workstream_ids) :])
+        remaining.extend(workstream_ids[len(projects) :])
+        workstreams.extend(
+            item
+            for item in remaining
+            if item not in workstreams
         )
+        workstreams = workstreams[:MAX_QUERY_SCOPE_IDS]
         return {
             "id": node.id,
             "type": node.kind,
